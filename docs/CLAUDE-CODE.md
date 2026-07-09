@@ -54,10 +54,9 @@ claude --output-format json -p "Reply with exactly: ok" < /dev/null
 `--bare` (Q3) still pins `--add-dir` and `--permission-mode`. The only
 behavioural difference is that `--bare` skips `CLAUDE.md` auto-discovery,
 plugin sync, hook scripts, attribution, and auto-memory. Recommended in
-`args_template` for swarm runs: the operator-installed `SessionEnd` hook
-on this box (`~/.claude/hooks/scripts/session-end.js`) prints a
-`MODULE_NOT_FOUND` stack trace to stderr on every invocation; `--bare`
-suppresses the noise. Exit code stays 0 in both modes.
+`args_template` for swarm runs: deterministic stderr and no
+hook-script side effects beat personalization when dozens of workers
+run in parallel. Exit code stays 0 in both modes.
 
 ## Tool gating
 
@@ -233,12 +232,13 @@ same `"outputTokens"\s*:\s*([0-9]+)` form.
 
 ## Known caveats
 
-- `--bare` suppresses operator-config-broken hook noise. The
-  `SessionEnd` hook at `~/.claude/hooks/scripts/session-end.js` fails on
-  shutdown with `Cannot find module '../lib/utils'` (operator-config
-  drift, not a `claude` bug). `--bare` skips hooks; without it the stack
-  trace lands on stderr. Filed as a separate housekeeping item outside
-  the ringer repo.
+- `--bare` is recommended for swarm runs. It skips `CLAUDE.md`
+  auto-discovery, plugin sync, hook scripts, attribution, and
+  auto-memory. Without `--bare`, any operator-config-broken hook
+  (e.g. a `SessionEnd` script that throws on shutdown) lands its
+  stack trace on stderr. `--bare` skips hooks entirely so the
+  stderr stays deterministic. Fixing the hook is operator-side;
+  out of scope for the ringer repo.
 - `Bash` in the allowlist is a `Write` fallback, not just a convenience.
   Q3 observed partial `--allowedTools` honoring on this CLI build —
   `Write` was sometimes shadowed. Remove `Bash` once `--allowedTools`
