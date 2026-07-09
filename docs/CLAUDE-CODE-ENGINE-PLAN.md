@@ -23,7 +23,7 @@ other lanes get. Also useful as a third reviewer in a swarm
 (`agy-implement / claude-review`, `claude-implement / codex-review`,
 etc.).
 
-## Probe evidence (2026-07-09, on this box)
+## Probe evidence (2026-07-09, claude 2.1.179 on Linux)
 
 ```
 $ claude --version
@@ -94,8 +94,7 @@ claude-bare-ok
   `--dangerously-skip-permissions`). Pair with `allow_full_access=true`
   belt-and-suspenders.
 - **Hook noise** observed: at process exit, claude tries to run a
-  `SessionEnd` hook and a broken one (here
-  `$HOME/.claude/hooks/scripts/session-end.js` with a missing module)
+  `SessionEnd` hook and a broken one (a broken operator-installed script)
   prints a stack trace to stderr. Cosmetic — exit code stays 0,
   the JSON response is emitted first. `--bare` skips hooks entirely.
   Recommend `--bare` in `args_template` for swarm runs.
@@ -124,9 +123,9 @@ The four questions below were resolved by live probes on
    session hangs.
 3. **`--bare` quirks (Q3).** `--bare -p` still pin `--add-dir` and
    `--permission-mode`. With `--bare`, hook stderr noise is
-   suppressed (the operator's broken `SessionEnd` hook
-   `~/.claude/hooks/scripts/session-end.js` otherwise prints a
-   stack trace on every invocation). Recommend keeping `--bare` in
+   suppressed (a broken `SessionEnd` hook on the operator's box
+   (path is operator-specific) otherwise prints a stack trace on
+   every invocation). Recommend keeping `--bare` in
    `args_template`. **Side finding:** `--allowedTools` honoring is
    partial on this CLI build (probe agent did not always see
    `Write`); include `Bash` in the allowlist as a fallback.
@@ -340,8 +339,7 @@ have a "Test plan" with all of these as checkboxes.
    - Body: TL;DR, design (cite probe evidence above), behaviour, tests,
      docs, smoke, "what's not in scope" (Seatbelt wrapper), test plan
      checklist
-   - URL: `https://github.com/eljese/ringer/pull/4` (next slot on the
-     fork)
+   - URL: opened via `gh pr create --repo eljese/ringer`
 8. **Iterate on review**
    - Watch for codex/agy review comments; address critical/high inline,
      medium inline if cheap, low/nit deferred
