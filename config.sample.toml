@@ -148,6 +148,68 @@ token_regex = "tokens\\s+used\\s*:?\\s*([0-9][0-9,]*)"
 # Token output format for agy 1.1.0 not yet verified — leave disabled.
 # token_regex = ""
 
+# Claude Code (Anthropic) — Anthropic's official headless CLI.
+# Install: `npm install -g @anthropic-ai/claude-code` (or the
+# official installer at https://claude.com/install), then run `claude`
+# interactively to authenticate.
+# Verified against claude 2.1.179 (2026-07-09) on Linux.
+# See docs/CLAUDE-CODE-PROBE-RESULTS.md for the live evidence behind
+# each flag below.
+#
+# Notes from the probe pass:
+#  --add-dir (Q2): allow-list for tool paths, NOT a write pin. Writes
+#       resolve against cwd. Combined with Ringer setting cwd = taskdir,
+#       this is sufficient — no extra `cd $taskdir` injection needed.
+#  --permission-mode acceptEdits (Q3): honoured in --bare mode. But
+#       without an --allowedTools whitelist the agent still hangs on
+#       interactive permission prompts. The whitelist below is REQUIRED
+#       for unattended -p runs. Bash is included as a Write fallback
+#       because Q3 observed partial --allowedTools honoring on this
+#       CLI build.
+#  --bare (Q3): still pins --add-dir / --permission-mode. Skips
+#       operator-installed SessionEnd hooks (a broken session-end.js
+#       on the operator's box polled stderr on every invocation; --bare
+#       suppresses it). Recommended in args_template for swarm runs.
+#  --output-format json (Q4): top-level shape carries
+#       usage.output_tokens (snake_case) and modelUsage.*.outputTokens
+#       (camelCase). token_regex below targets the snake_case key.
+# Uncomment to enable.
+# [engines.claude]
+# bin = "claude"
+# Q1: claude-sonnet-4-6 is the current-gen Sonnet and was accepted on
+#     every probe run. claude-sonnet-4-5, claude-opus-4-7/4-8, and
+#     claude-haiku-4-5 are also accepted; pin per task via manifest.
+# model_default = "claude-sonnet-4-6"
+# args_template = [
+#   "--bare",
+#   "--add-dir",
+#   "{taskdir}",
+#   "--model",
+#   "{model}",
+#   "{access_args}",
+#   "{engine_args}",
+#   "--output-format",
+#   "json",
+#   "-p",
+#   "{spec}",
+# ]
+# Q2/Q3: --allowedTools whitelist is REQUIRED — without it the agent
+#         hits interactive permission prompts and hangs. The whitelist
+#         mirrors the codex workspace-write spirit (read/edit/grep/glob
+#         plus write). Bash is kept as a Write fallback because Q3
+#         observed that --allowedTools honoring is partial on this
+#         build; for tighter containment, document the alternative:
+#         swap to --dangerously-skip-permissions (full_access_args).
+# sandbox_args = [
+#   "--permission-mode", "acceptEdits",
+#   "--allowedTools", "Read Edit Write Glob Grep Bash",
+# ]
+# full_access_args = ["--dangerously-skip-permissions"]
+# Q4: regex source (Python r-string form):  "output_tokens"\s*:\s*([0-9]+)
+#     TOML string below compiles to that source. Captures the integer
+#     `output_tokens` count from a `--output-format json` response.
+# token_regex = "\"output_tokens\"\\s*:\\s*([0-9]+)"
+
 # For CI, acceptance evals, and trying Ringer without an API bill.
 # [engines.mock]
 # bin = "python3"
