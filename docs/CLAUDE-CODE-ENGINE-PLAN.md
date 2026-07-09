@@ -1,13 +1,14 @@
 # Plan — `claude` engine lane for Ringer
 
-Status: **draft for review**. Captures the probe evidence, the proposed
-shape of the engine block, and the work breakdown for adding
-`claude` (Anthropic's Claude Code CLI, currently `claude 2.1.179`)
-as a Ringer worker.
+Status: **draft for review** (probes complete; questions Q1-Q4 resolved
+by 2026-07-09 — see `docs/CLAUDE-CODE-PROBE-RESULTS.md`). Captures
+the probe evidence, the proposed shape of the engine block, and the
+work breakdown for adding `claude` (Anthropic's Claude Code CLI,
+currently `claude 2.1.179`) as a Ringer worker.
 
 Once approved, this becomes the spec for the actual implementation PR
 (different branch / different commit set, this branch carries only the
-plan doc).
+plan + probe-results docs).
 
 ## Why
 
@@ -71,9 +72,16 @@ claude-bare-ok
 - `claude -p "<prompt>"` is the headless mode analog of `codex exec`
   and `agy -p`. Verified: stdin can be closed (`< /dev/null`); the
   prompt is the positional `prompt` arg.
-- `--add-dir <abs>` scopes the agent's write tools to that directory
-  (confirmed by the `probe.txt` write landing at the target path).
-  Same first-party answer to the cwd bug as agy.
+- `--add-dir <abs>` is a tool-path **allow-list**, not a write pin.
+  Plan-side, Ringer sets cwd = taskdir and the model resolves
+  relative paths against cwd — confirmed by probe case 1 (cwd
+  outside `--add-dir`) and case 2 (cwd inside `--add-dir`); the
+  file lands at cwd-relative in both. So `--add-dir {taskdir}` is
+  sufficient; no `cd $taskdir` injection in `args_template`
+  needed. **Required addition:** without `--allowedTools`, the
+  agent still hits interactive permission prompts even with
+  `--permission-mode acceptEdits`. Whitelist
+  `"Read Edit Write Glob Grep Bash"` for unattended `-p` runs.
 - `--output-format json` emits a single-line JSON with `usage` and
   `total_cost_usd` — the canonical shape for the lane's `token_regex`.
 - `--permission-mode` accepts `acceptEdits`, `auto`, `bypassPermissions`,
@@ -92,37 +100,54 @@ claude-bare-ok
   the JSON response is emitted first. `--bare` skips hooks entirely.
   Recommend `--bare` in `args_template` for swarm runs.
 
-## Open questions for the implementation phase
+## Resolved by probes (2026-07-09)
 
-These are blockers for the actual code, not the plan. Need live
-investigation on a clean config (not this box's anthropic/auth state).
+The four questions below were resolved by live probes on
+`claude 2.1.179` (this box). Full evidence in
+`docs/CLAUDE-CODE-PROBE-RESULTS.md`. Summary:
 
-1. **Model ID surface.** The probe's `modelUsage` is keyed by the
-   assistant this CLI session was configured with (`MiniMax-M3` here).
-   Need to confirm what IDs a normal user's `claude --model <id>` accepts
-   in `claude 2.1.179` (e.g. `claude-sonnet-4-5`, `claude-opus-4-7`,
-   `claude-haiku-4-5`). Default model choice in
-   `config.sample.toml`: latest stable Sonnet unless the user's account
-   can't reach it.
-2. **`--add-dir` + cwd interaction.** Confirmed `--add-dir {abs}` works
-   with an abs path in the prompt. Need to confirm `--add-dir {abs}`
-   with a `cwd` that's NOT under the added dir (does clause respect
-   cwd for relative paths? `agy 1.1.0` doesn't, per issue #2).
-3. **`--bare` quirks.** Need to confirm `--bare -p` still honours
-   `--add-dir`, `--allowedTools`, `--permission-mode`. The help blurb
-   says yes (it just skips hooks + memory), but verify on this
-   version before locking it into `args_template`.
-4. **`token_regex` shape.** Plan: `"output_tokens"\s*:\s*([0-9]+)`
-   (Ringer wants one capture group). Output tokens are the
-   cost-relevant count. Alternative: combine input + output via two
-   pattern matches and let Ringer take the last hit; less surgical.
-5. **Wrapper or no wrapper?** `opencode-sandboxed.sh` is a Seatbelt
-   wrapper because OpenCode has no OS sandbox. `claude` does have
-   `--permission-mode` + `--allowedTools` for tool gating, so a
-   Seatbelt wrapper is *optional* in v1. If we ship without one, the
-   v2 work (post-MVP) is adding a `claude-ringer.sh` that wraps the
-   engine in Seatbelt for additional OS-level containment. Decision
-   flagged in `#work-breakdown` below.
+1. **Model ID surface (Q1).** All 7 candidate IDs accepted
+   (`claude-sonnet-4-5`, `claude-opus-4-7`, `claude-haiku-4-5`,
+   `claude-sonnet-4-6`, `claude-opus-4-8`, plus the `*-latest`
+   aliases `claude-3-5-sonnet-latest` / `claude-3-5-haiku-latest`).
+   Recommended `model_default`: `claude-sonnet-4-6` (current-gen
+   Sonnet). Avoid `*-latest` aliases in pinned config — they
+   silently shift the underlying model on CLI upgrades.
+2. **`--add-dir` + cwd (Q2).** `--add-dir` is a tool-path
+   **allow-list**, NOT a write pin. cwd always wins for write
+   resolution, regardless of whether cwd is inside `--add-dir` or
+   outside it. Plan's `--add-dir {taskdir}` recipe is fine as-is —
+   no `cd $taskdir` injection required in `args_template`.
+   **Side finding:** `--allowedTools` is REQUIRED on this CLI build
+   for unattended `-p` runs — without it, `--permission-mode
+   acceptEdits` still hits interactive permission prompts and the
+   session hangs.
+3. **`--bare` quirks (Q3).** `--bare -p` still pin `--add-dir` and
+   `--permission-mode`. With `--bare`, hook stderr noise is
+   suppressed (the operator's broken `SessionEnd` hook
+   `~/.claude/hooks/scripts/session-end.js` otherwise prints a
+   stack trace on every invocation). Recommend keeping `--bare` in
+   `args_template`. **Side finding:** `--allowedTools` honoring is
+   partial on this CLI build (probe agent did not always see
+   `Write`); include `Bash` in the allowlist as a fallback.
+4. **`token_regex` shape (Q4).** Plan's draft regex
+   (`"\"output_tokens\"\\s*:\\s*([0-9]+)"`) was **broken** — the
+   JSON serialization has no space between the closing quote of the
+   key and the colon (`"output_tokens":27`, not `"output_tokens" :
+   27`). The space-class `\s*` after the literal `output_tokens`
+   matched nothing because there was no whitespace gap to absorb.
+   Correct regex source (Python form):
+   `"output_tokens"\s*:\s*([0-9]+)`
+   — note the literal `"` before `output_tokens` so the regex lands
+   on the actual JSON serialization. Captures `usage.output_tokens`
+   (i.e. `27` on the probe response). Same fix applies to any
+   future snake_case token key.
+
+Note on the wrapper question (#5): confirmed there is no Seatbelt
+wrapper needed for v1. `--permission-mode acceptEdits` +
+`--allowedTools` provides sufficient tool gating for the
+headless-CLI workflow. A `claude-ringer.sh` Seatbelt wrapper (parallel
+to `engines/opencode-sandboxed.sh`) is deferred to a separate PR.
 
 ## Proposed shape
 
@@ -160,7 +185,7 @@ investigation on a clean config (not this box's anthropic/auth state).
 # Uncomment to enable.
 # [engines.claude]
 # bin = "claude"
-# model_default = "claude-sonnet-4-5"
+# model_default = "claude-sonnet-4-6"
 # args_template = [
 #   "--bare",
 #   "--add-dir",
@@ -176,7 +201,7 @@ investigation on a clean config (not this box's anthropic/auth state).
 # ]
 # sandbox_args = [
 #   "--permission-mode", "acceptEdits",
-#   "--allowedTools", "Read Edit Write Glob Grep",
+#   "--allowedTools", "Read Edit Write Glob Grep Bash",
 # ]
 # full_access_args = ["--dangerously-skip-permissions"]
 # token_regex = "\"output_tokens\"\\s*:\\s*([0-9]+)"
@@ -215,8 +240,13 @@ in a tempdir. Cases to cover:
 2. `acceptEdits` permission mode flags are passed through `{access_args}`.
 3. `--allowedTools` whitelist is forwarded.
 4. `--output-format json` is the canonical mode; stub emits a
-   one-line JSON with `usage.output_tokens`, regex captures the
-   right number.
+   one-line JSON with `usage.output_tokens` serialized as
+   `"output_tokens":N` (no space after the closing quote — the
+   actual JSON shape, see Q4 in
+   `docs/CLAUDE-CODE-PROBE-RESULTS.md`). The
+   configured regex `"\"output_tokens\"\\s*:\\s*([0-9]+)"`
+   (Python source `"output_tokens"\s*:\s*([0-9]+)`) must capture
+   the integer `N`.
 5. `--no-sandbox / bypassPermissions` mapped via `full_access_args`
    requires `--allow-full-access` (validated by ringer, not the
    wrapper).
@@ -244,7 +274,7 @@ in a tempdir. Cases to cover:
     {
       "key": "claude-file-create",
       "engine": "claude",
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "spec": "Create a file named claude-smoke.txt in the current working directory. The file must contain exactly this text and nothing else: claude works with ringer",
       "expect_files": ["claude-smoke.txt"],
       "check": "printf 'claude works with ringer' > expected.txt && diff -u expected.txt claude-smoke.txt",
