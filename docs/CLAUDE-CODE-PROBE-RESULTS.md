@@ -101,7 +101,7 @@ Two runs probed back-to-back, identical except for `--bare`:
 | run | flags | exit | stderr |
 | --- | --- | --- | --- |
 | 1 | `--bare --add-dir T --permission-mode acceptEdits --allowedTools "Read Write" --output-format json` | 0 | **empty** |
-| 2 | same without `--bare` | 0 | full `MODULE_NOT_FOUND` stack trace from `~/.claude/hooks/scripts/session-end.js:22` |
+| 2 | same without `--bare` | 0 | full `MODULE_NOT_FOUND` stack trace from the SessionEnd hook script (operator-specific path anonymized below) |
 
 The hook stderr in run 2 reproduces verbatim:
 
