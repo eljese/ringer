@@ -105,6 +105,15 @@ token_regex = "tokens\\s+used\\s*:?\\s*([0-9][0-9,]*)"
 # `agy models` lists the available model keys; default below uses
 # "Gemini 3.5 Flash (High)". Override per-task via the manifest "model"
 # field, or set model_default to another verified key.
+#
+# **Sandbox is the default and the only safe option.** `agy` is wired
+# so the literal `--sandbox` flag always appears in args_template, and
+# `sandbox_args = []` (no extras) — every default task runs sandboxed.
+# Full access (`full_access_args = ["--dangerously-skip-permissions"]`)
+# only takes effect when a task explicitly sets `"full_access": true`
+# AND the config has `allow_full_access = true`. Without that opt-in,
+# the bypass is impossible regardless of what the worker prompt says.
+# This matches the same belt-and-suspenders model the codex block uses.
 # If `--project {taskdir}` does not set the working directory reliably on
 # your installed version, point `bin` at engines/agy-ringer.sh instead and
 # drop "--project" from args_template.

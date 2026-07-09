@@ -64,10 +64,16 @@ Avoid `plan` mode for write tasks — it only emits plans.
 
 ## Sandbox
 
-`agy` accepts `--sandbox` directly, so `sandbox_args = []` is correct and
-`sandbox_args` is wired through `{access_args}` in `args_template`. Full-access
-mapping uses `--dangerously-skip-permissions` until a verified no-sandbox flag
-is available.
+**Sandbox is on by default and there is no off switch from the worker side.** The `args_template` for `[engines.agy]` always includes the literal `--sandbox` flag; `sandbox_args = []` because agy's own flag is what we want — no extra Ringer-side args needed. Every default task therefore runs sandboxed.
+
+`full_access_args = ["--dangerously-skip-permissions"]` is wired through `{access_args}` and only fires when both:
+
+- the task sets `"full_access": true`, AND
+- the config has `allow_full_access = true` (the belt-and-suspenders gate).
+
+Without that dual opt-in, the bypass is impossible regardless of what the worker prompt says. This matches the same model the codex block uses — sandbox is the floor, full-access is an explicit per-task opt-in you must request from a human.
+
+If you want a sandbox-stricter mode than agy's default `--sandbox` provides, check `agy --help` for any `--sandbox=<profile>` form on your installed version and override the literal flag in `args_template`.
 
 ## Smoke test
 
