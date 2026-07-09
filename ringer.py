@@ -7884,6 +7884,140 @@ def write_settings(path: Path, settings: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def load_toml_settings(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"config file is not valid TOML: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"config file must contain a TOML table at the root: {path}")
+    return data
+
+
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(key: str) -> str:
+    if _TOML_BARE_KEY_RE.match(key):
+        return key
+    return _toml_escape_string(key)
+
+
+def _toml_escape_string(value: str) -> str:
+    out = ['"']
+    for ch in value:
+        cp = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif cp < 0x20 or cp == 0x7F:
+            out.append(f"\\u{cp:04X}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def _toml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        rendered = repr(value)
+        if "." not in rendered and "e" not in rendered and "E" not in rendered:
+            rendered += ".0"
+        return rendered
+    if isinstance(value, str):
+        return _toml_escape_string(value)
+    raise ValueError(f"unsupported TOML scalar type: {type(value).__name__}")
+
+
+def _toml_emit_table(body: dict[str, Any], prefix: tuple[str, ...]) -> list[str]:
+    """Emit the contents of a single TOML table. Caller writes the header."""
+    lines: list[str] = []
+    scalars: list[tuple[str, Any]] = []
+    arrays_of_scalars: list[tuple[str, list[Any]]] = []
+    nested_tables: list[tuple[str, dict[str, Any]]] = []
+    arrays_of_tables: list[tuple[str, list[dict[str, Any]]]] = []
+
+    for key, value in body.items():
+        if isinstance(value, dict):
+            nested_tables.append((key, value))
+        elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            arrays_of_tables.append((key, value))
+        elif isinstance(value, list):
+            arrays_of_scalars.append((key, value))
+        else:
+            scalars.append((key, value))
+
+    for key, value in scalars:
+        lines.append(f"{_toml_key(key)} = {_toml_scalar(value)}")
+    for key, items in arrays_of_scalars:
+        rendered = [_toml_scalar(item) for item in items]
+        lines.append(f"{_toml_key(key)} = [{', '.join(rendered)}]")
+
+    has_scalars = bool(scalars or arrays_of_scalars)
+    has_subsections = bool(nested_tables or arrays_of_tables)
+    if has_scalars and has_subsections:
+        lines.append("")
+
+    for key, sub in nested_tables:
+        path = prefix + (key,)
+        header = "[" + ".".join(_toml_key(p) for p in path) + "]"
+        lines.append(header)
+        lines.extend(_toml_emit_table(sub, path))
+        lines.append("")
+
+    for key, items in arrays_of_tables:
+        for item in items:
+            path = prefix + (key,)
+            header = "[[" + ".".join(_toml_key(p) for p in path) + "]]"
+            lines.append(header)
+            lines.extend(_toml_emit_table(item, path))
+            lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def write_toml_settings(path: Path, settings: dict[str, Any]) -> None:
+    """Hand-rolled minimal TOML writer for the subset ringer touches.
+
+    Supports: strings, bools, ints, floats, arrays of scalars, nested
+    tables, and arrays of tables. Quotes keys that are not bare
+    identifiers ([A-Za-z0-9_-]). Does NOT preserve comments from the
+    source (same precedent as write_settings).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_file(path)
+    if not settings:
+        body: list[str] = []
+    else:
+        body = _toml_emit_table(settings, ())
+    text = "\n".join(body)
+    if body:
+        text += "\n"
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def hook_command_contains(value: Any, needle: str = "ringer_nudge.py") -> bool:
     return isinstance(value, dict) and needle in str(value.get("command", ""))
 
