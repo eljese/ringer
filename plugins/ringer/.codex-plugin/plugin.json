@@ -1,0 +1,6 @@
+{
+  "name": "ringer",
+  "version": "1.0.0",
+  "description": "Ringer orchestrator: a single nudge skill + pre-bash hook that points Codex at the ringer playbook whenever a model call or harness script runs outside a live Ringer run.",
+  "skills": "./skills/"
+}
