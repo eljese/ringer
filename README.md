@@ -49,7 +49,10 @@ mkdir -p ~/.config/ringer && cp config.sample.toml ~/.config/ringer/config.toml 
 
 ```bash
 # optional but recommended: teach your agent to route work through ringer
-./ringer.py install-agent
+./ringer.py install-agent                  # Claude Code + Codex (default)
+./ringer.py install-agent --no-codex       # Claude Code only
+./ringer.py install-agent --no-claude      # Codex only
+./ringer.py install-agent --project        # install under ./.{claude,codex} for both engines
 ```
 
 4. Run the demo:
@@ -132,11 +135,14 @@ Run one command:
 ./ringer.py install-agent
 ```
 
-It installs the ringer skill — the orchestrator playbook — user-level for Claude Code, and registers two gentle hooks: a Bash hook that notices model-calling or harness commands running outside a live Ringer run, and an edit-loop hook that notices batch editing without a run. Each hook nudges ONCE per session, pointing the agent at the skill.
+By default this installs the ringer scaffolding for **both** engines:
 
-The hooks never block anything. A user who says "just do it inline" is obeyed; uninstall with `./ringer.py uninstall-agent`.
+- **Claude Code**: the ringer skill at `~/.claude/skills/ringer/SKILL.md` plus two hooks in `~/.claude/settings.json` — a `PreToolUse Bash` hook that notices model-calling or harness commands running outside a live Ringer run, and a `PostToolUse Edit|Write` hook that notices batch editing without a run. Each hook nudges ONCE per session, pointing the agent at the skill.
+- **Codex CLI**: a minimal ringer plugin at `~/.codex/plugins/ringer/` registered in `~/.codex/config.toml` as `[plugins.ringer] enabled = true`, carrying the same skill and a `PreToolUse Bash` hook. Codex only delivers Bash events to user-config and plugin hooks, so the edit-loop nudge is Claude-only; the Bash hook handles model/harness detection on the Codex side.
 
-For CI and evals, `config.sample.toml` includes `[engines.mock]` so the enforcement stack can be tested without an API bill.
+The hooks never block anything. A user who says "just do it inline" is obeyed; uninstall with `./ringer.py uninstall-agent` (also installs/removes for both engines by default; use `--no-claude` / `--no-codex` to scope).
+
+For CI and evals, `config.sample.toml` includes `[engines.mock]` so the enforcement stack can be tested without an API bill. See `docs/CODEX.md` for the codex plugin layout and verification steps.
 
 ## Engines are pluggable
 
