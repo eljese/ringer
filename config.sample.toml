@@ -167,9 +167,9 @@ token_regex = "tokens\\s+used\\s*:?\\s*([0-9][0-9,]*)"
 #       because Q3 observed partial --allowedTools honoring on this
 #       CLI build.
 #  --bare (Q3): still pins --add-dir / --permission-mode. Skips
-#       operator-installed SessionEnd hooks (a broken session-end.js
-#       on the operator's box polled stderr on every invocation; --bare
-#       suppresses it). Recommended in args_template for swarm runs.
+#       CLAUDE.md auto-discovery, plugin sync, hook scripts,
+#       attribution, and auto-memory. Useful for swarm runs where
+#       deterministic stderr beats personalization.
 #  --output-format json (Q4): top-level shape carries
 #       usage.output_tokens (snake_case) and modelUsage.*.outputTokens
 #       (camelCase). token_regex below targets the snake_case key.
