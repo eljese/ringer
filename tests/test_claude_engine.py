@@ -190,11 +190,48 @@ class ClaudeEngineTests(unittest.TestCase):
         # Whole-file parse — must succeed. The claude block is
         # commented out so it is not in this parse; the point is to
         # confirm the surrounding config has no syntax errors after
-        # the claude insertion.
+        # the claude insertion. Tightened from a smoke test to a
+        # concrete shape check: the top-level `engines` table is
+        # present, the default `codex` lane is intact, and the
+        # post-insertion layout has the documented section count.
+        # Regression: a stray unescaped quote in a `token_regex`
+        # would have been silently accepted by the loose
+        # `assertIn` form and only caught at first real worker run.
         text = CONFIG.read_text(encoding="utf-8")
         parsed = tomllib.loads(text)
         self.assertIn("engines", parsed)
-        self.assertIn("codex", parsed["engines"])
+        engines = parsed["engines"]
+        self.assertIn("codex", engines)
+        # Every other engine sub-table is commented out by design;
+        # only the default `codex` lane is uncommented in the
+        # shipped sample. Pin the uncommented-set so a future edit
+        # that accidentally live-enables a second lane is caught.
+        self.assertEqual(set(engines.keys()), {"codex"})
+        # The file must still contain a commented [engines.claude]
+        # block (the opt-in window) and a closing commented engine
+        # table header after it (the sentinel that bounds the
+        # uncommenting helper).
+        self.assertRegex(text, r"(?m)^#\s*\[engines\.claude\]\s*$",
+                         msg="[engines.claude] header missing or uncommented")
+        # Window-edge invariant: at least one commented engine table
+        # header appears AFTER the [engines.claude] header, so the
+        # end-marker in `_load_claude_block_from_sample_config` will
+        # actually fire. Without a closing header, the uncommenting
+        # helper would silently consume the rest of the file.
+        lines = text.splitlines()
+        claude_header_idx = None
+        for i, line in enumerate(lines):
+            if re.match(r"^#\s*\[engines\.claude\]\s*$", line):
+                claude_header_idx = i
+                break
+        self.assertIsNotNone(claude_header_idx)
+        rest = lines[claude_header_idx + 1:]
+        closing = [i for i, ln in enumerate(rest)
+                   if re.match(r"^#\s*\[engines\.[a-zA-Z_]+\]\s*$", ln)]
+        self.assertTrue(closing,
+                        msg="no closing engine-table header after "
+                            "[engines.claude]; uncommenting helper "
+                            "would consume the rest of the file")
 
     def test_token_regex_source_has_literal_closing_quote(self) -> None:
         # Regression check for the Q4 finding: the regex source MUST
