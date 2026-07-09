@@ -29,21 +29,28 @@ mode that exits cleanly without a TTY. Verified with:
 agy -p "Reply with exactly: agy-headless-ok" < /dev/null   # exits 0, prints agy-headless-ok
 ```
 
-`--project {taskdir}` points `agy` at the task directory so it writes inside it.
+Use `--add-dir {taskdir}` to scope filesystem writes to that directory. The
+flags break down as:
 
-> **Verified 2026-07-08 against agy 1.1.0:** even with `--project
-> {taskdir}`, agy writes the file to
-> `~/.gemini/antigravity-cli/scratch/`, not to the task directory. The
-> `engines/agy-ringer.sh` wrapper handles this for the common
-> single-file case: after agy exits, files written to the scratch
-> dir DURING this invocation (mtime newer than a per-run marker) are
-> mirrored into `{taskdir}`. See "Engine wrapper" below for the
-> contract and the concurrent-run warning.
+- `--add-dir <dir>` (repeatable): scopes the agent's write tools to `<dir>`
+  and treats it as the workspace anchor — files end up under `<dir>`.
+  **This is what you want for Ringer file-creation tasks.**
+- `--project <id>`: a project-ID token in agy 1.1.0; does NOT pin
+  filesystem writes. Naming the bug: the issue body recommended
+  `--project {taskdir}`, which agy accepted but treated as a project
+  identifier, so writes still landed in `~/.gemini/antigravity-cli/scratch/`.
 
-The cleanest fix is still upstream: agy 1.2+ shipping a real `--cwd`
-flag. Until then, use the wrapper for file-creation tasks (one
-`agy` invocation per taskdir at a time) and agy direct for
-read-only review/plan tasks.
+> **Verified 2026-07-09 against agy 1.1.0 on Linux:**
+> a one-task probe `agy --add-dir $td --sandbox --mode accept-edits -p
+> 'Create hello.txt in current working directory …'` writes `hello.txt`
+> to `$td/hello.txt` with the spec-derived content; nothing leaks to
+> the scratch dir. Single-task `agy-smoke.json` passes first try under
+> the corrected recipe.
+
+If `--add-dir` is missing on your installed version or behaves
+differently (re-test on every agy upgrade), fall back to
+`engines/agy-ringer.sh` for that worker; the wrapper mirrors scratch
+back to `{taskdir}` after agy exits.
 
 ## Engine wrapper
 

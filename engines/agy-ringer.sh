@@ -1,31 +1,43 @@
 #!/usr/bin/env bash
 # ringer wrapper for `agy` (Antigravity CLI).
 #
-# Mitigates two verified gaps in agy 1.1.0 as a Ringer worker:
+# FALLBACK ONLY. As of 2026-07-09 the verified-working recipe is just
+# `agy --add-dir {taskdir} --sandbox ...`, with no wrapper. `--add-dir`
+# scopes agy's write tools to {taskdir} in agy 1.1.0; `--project {taskdir}`
+# does NOT (agy treats `--project` as a project-ID token, and writes
+# still land in ~/.gemini/antigravity-cli/scratch/). The shipped
+# config.sample.toml ships the corrected recipe.
 #
-#   1. `agy --project {taskdir}` does NOT pin filesystem writes to
-#      that directory. The file lands in
-#      `~/.gemini/antigravity-cli/scratch/` instead, so a Ringer
-#      task's `expect_files` check against `{taskdir}` sees nothing
-#      even though agy produced the file. (The wrapper `cd`s into
-#      `{taskdir}` too, but agy ignores cwd for write tools.)
+# This wrapper exists for installs where `--add-dir` is unavailable or
+# behaves differently (e.g. an older or newer agy where the
+# workspace-binding flag regressed). If you find yourself reaching for
+# it, first re-test `--add-dir` against your installed `agy --help`.
 #
-#   2. Ringer retries wrap the spec in a "missing expected files: ..."
-#      preamble that pushes agy into a different execution mode; the
-#      same spec is non-deterministic across attempts.
+# What the wrapper does (legacy/compat fallback):
 #
-# This wrapper addresses (1) for the common single-file case. After
-# agy exits, files written to the scratch dir DURING this invocation
-# (mtime newer than a per-run marker) are mirrored into `{taskdir}`.
-# The mirror uses `cp -n` by default so a file already in `{taskdir}`
-# is never overwritten — correct outputs win over scratch spills from
-# concurrent runs. See the concurrent-run warning in `docs/AGY.md`
-# for the limit of this heuristic.
+#   1. `cd`s into `{taskdir}` before invoking agy (so tool process cwd
+#      is correct even though agy itself uses the scratch dir).
 #
-# (2) is not solvable in the wrapper. Use agy for read-only tasks
-# (review/plan). For file-creation tasks that must succeed first try,
-# use codex or another worker that respects cwd, until agy ships a
-# real `--cwd` flag.
+#   2. After agy exits, mirrors any file in the scratch dir whose
+#      mtime is newer than an invocation-start marker into `{taskdir}`.
+#      Default policy is `cp -n` (no-clobber): a file already in
+#      `{taskdir}` is never overwritten. Tunables:
+#        - AGY_RINGER_NO_BACK_COPY=1     skip the mirror entirely
+#        - AGY_RINGER_FORCE_BACK_COPY=1  overwrite existing taskdir files
+#        - AGY_RINGER_SCRATCH_DIR=/path  override the scratch root
+#
+#   3. Emits a summary line on stderr:
+#        agy-ringer: copied=N skipped=K missing=M from <scratch>
+#
+#   4. Propagates agy's exit code; per-attempt Ringer retry is
+#      unchanged.
+#
+# Limitations:
+#
+#   - Concurrent agy runs against the same scratch dir can collide on
+#     filename; use `--max-parallel 1` for strict isolation.
+#   - The retry-batch non-determinism noted in issue #2 still applies
+#     to agy 1.1.0 and is not fixed here.
 #
 # Usage (as a Ringer engine bin):
 #
