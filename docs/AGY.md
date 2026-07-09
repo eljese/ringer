@@ -30,23 +30,27 @@ agy -p "Reply with exactly: agy-headless-ok" < /dev/null   # exits 0, prints agy
 ```
 
 `--project {taskdir}` points `agy` at the task directory so it writes inside it.
-If your installed `agy` ignores `--project`, swap `bin` for the shipped wrapper
-`engines/agy-ringer.sh` (committed alongside this doc) which `cd`s into the
-task dir before exec'ing `agy`. When you switch to the wrapper:
 
-- Use an **absolute** path for `bin` (Ringer launches workers with
-  `cwd=taskdir`, so a relative path would not resolve).
-- Drop `"--project"` from `args_template` — the wrapper handles directory
-  isolation via `cd`. The replacement template looks like:
-  ```
-  args_template = [
-    "{taskdir}",
-    "--model", "{model}",
-    "--sandbox", "{access_args}",
-    "{engine_args}",
-    "-p", "{spec}",
-  ]
-  ```
+> **Verified 2026-07-08 against agy 1.1.0:** even with `--project
+> {taskdir}`, agy writes the file to
+> `~/.gemini/antigravity-cli/scratch/`, not to the task directory. The
+> wrapper fallback (`engines/agy-ringer.sh`) `cd`s into the task dir,
+> but agy ignores the cwd for filesystem writes too. End result:
+> `expect_files` and any `check` against files written by agy land in
+> the scratch dir, not the taskdir.
+
+That means the shipped smoke manifest will fail until one of these
+becomes true:
+
+- agy ships a real cwd / working-directory flag (currently it does
+  not), or
+- someone writes a wrapper that **also copies the scratch file** into
+  the taskdir after agy exits. This is fragile because the scratch
+  filename is global, so concurrent runs collide.
+
+The cleanest fix is upstream: agy 1.2+ scope. Until then, do not rely
+on agy writing into the taskdir; use it for read-only review tasks or
+for work that produces plan-style output only.
 
 ## Permission prompts
 
@@ -82,9 +86,44 @@ workdir.
 
 ## Token accounting
 
-`agy` 1.1.0 token output format is not yet verified, so `token_regex` stays
-empty in the sample config. Once you have a real `worker.log` from a smoke run
-and can confirm a stable pattern, add the regex.
+**`agy` 1.1.0 does not expose per-call token counts** on stdout, stderr,
+or in its `--log-file`. Verified by:
+
+- A pure `agy -p "..."` invocation: no token count in the response or in
+  the journal log.
+- Inspecting `~/.gemini/antigravity-cli/conversations/<uuid>.db`
+  (trajectory_meta / gen_metadata tables) — the data is a protobuf blob
+  that holds the full system prompt + tools, not a per-prompt token
+  total. Decoding would require the upstream `.proto` schema, which is
+  not part of the public `agy` CLI.
+
+So `token_regex = ""` in the sample config is a deliberate no-op, not
+an oversight. Models-scoreboard on Ringside will show `API/PLAN:
+unknown` for any agy task — informational only, not an error.
+
+### Why no token count
+
+`agy` is designed for long interactive sessions with many tool calls,
+not single-shot prompts. The product team deliberately does not surface
+a per-prompt count because it would be misleading — session cost
+amortises across many calls. Ringer's scoreboard follows the same
+philosophy: track what is worth scaling (decisions, attempts,
+verdicts), not every token that flowed through.
+
+### If you need token counts anyway
+
+The portable workaround is a thin wrapper script that wraps `agy -p`
+and appends `TOTAL_TOKENS=<int>` to its own stdout, where the count is
+estimated externally (e.g. `tiktoken` for the prompt text, plus the
+response length). The wrapper becomes `bin` in the `[engines.agy]`
+config and the regex can match `TOTAL_TOKENS=(\d+)`. This is not
+shipped with the engine block because the estimate is ~rough (not the
+provider's own tokenizer) and not worth the complexity for an
+in-band metric.
+
+If `agy` ever ships a `--usage` / `--stats` flag that prints to stdout,
+update the sample block with a real `token_regex` and document the
+exact pattern.
 
 ## Known caveats
 
