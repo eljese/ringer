@@ -105,6 +105,14 @@ if [ "${AGY_RINGER_NO_BACK_COPY:-0}" = "1" ]; then
 fi
 
 SCRATCH_DIR="${AGY_RINGER_SCRATCH_DIR:-$HOME/.gemini/antigravity-cli/scratch}"
+# Strip ALL trailing slashes so the prefix-strip below matches find's
+# output regardless of how the user set AGY_RINGER_SCRATCH_DIR.
+# `${VAR%/}` only strips one — use a loop (or a non-portable extglob
+# pattern) so /tmp/scratch/// reduces to /tmp/scratch.
+# See the Codex P2 thread on PR #3.
+while [[ "${SCRATCH_DIR}" == */ ]]; do
+  SCRATCH_DIR="${SCRATCH_DIR%/}"
+done
 if [ ! -d "$SCRATCH_DIR" ]; then
   exit "$agy_status"
 fi

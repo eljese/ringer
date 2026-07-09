@@ -145,6 +145,37 @@ class AgyRingerWrapperTests(unittest.TestCase):
         self.assertFalse((taskdir / "agy-smoke.txt").exists())
         self.assertFalse((taskdir / "scripts").exists())
 
+    def test_trailing_slash_on_scratch_dir_normalised(self) -> None:
+        # Codex P2 thread on PR #3: when AGY_RINGER_SCRATCH_DIR is
+        # configured with a trailing slash, prefix-strip leaves a
+        # doubled slash and the relative path kept the absolute prefix,
+        # so files were copied to <taskdir>/tmp/foo instead of
+        # <taskdir>/foo. The wrapper must strip trailing slashes before
+        # deriving `rel`.
+        taskdir, scratch, stub_dir = self._setup_paths()
+        stub = _write_stub_agy(stub_dir, scratch)
+        env = {
+            "AGY_RINGER_SCRATCH_DIR": str(scratch) + "///",
+        }
+        proc = self._run_wrapper(
+            taskdir=taskdir, stub_agy=stub, extra_env=env,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        # Files must be at taskdir root, not at taskdir/<scratch>/...
+        self.assertEqual(
+            (taskdir / "agy-smoke.txt").read_text(), "agy-smoke-ok\n",
+        )
+        self.assertEqual(
+            (taskdir / "scripts" / "normalize.py").read_text(),
+            'print("hello")\n',
+        )
+        # And nothing got nested under a stray scratch-dir prefix.
+        for p in taskdir.rglob("*"):
+            rel = p.relative_to(taskdir).as_posix()
+            assert not rel.startswith("tmp" + "/"), (
+                f"file copied under /tmp-prefixed path: {rel}"
+            )
+
     def test_propagates_agy_exit_code(self) -> None:
         taskdir, scratch, stub_dir = self._setup_paths()
         failing_stub = stub_dir / "agy"
