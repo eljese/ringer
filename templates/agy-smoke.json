@@ -1,0 +1,20 @@
+{
+  "run_name": "agy-smoke",
+  "workdir": "/tmp/ringer-agy-smoke",
+  "max_parallel": 1,
+  "worktrees": false,
+  "tasks": [
+    {
+      "key": "agy-file-create",
+      "engine": "agy",
+      "model": "Gemini 3.5 Flash (High)",
+      "engine_args": ["--mode", "accept-edits"],
+      "spec": "Create a file named agy-smoke.txt in the current working directory. The file must contain exactly this text and nothing else: agy works with ringer",
+      "expect_files": ["agy-smoke.txt"],
+      "check": "printf 'agy works with ringer' > expected.txt && diff -u expected.txt agy-smoke.txt",
+      "verified": "The check proves agy created agy-smoke.txt with the exact requested content. Run via engines/run-agy-smoke.sh to wipe the workdir first — otherwise a previous successful run can leave a stale agy-smoke.txt that masks a new failure.",
+      "task_type": "probe",
+      "timeout_s": 900
+    }
+  ]
+}

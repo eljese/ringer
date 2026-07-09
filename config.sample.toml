@@ -97,6 +97,37 @@ token_regex = "tokens\\s+used\\s*:?\\s*([0-9][0-9,]*)"
 # CLIs report cost as "included in plan"; regex is a harmless no-match.
 # token_regex = "\"total_tokens\"\\s*:\\s*([0-9]+)"
 
+# Antigravity CLI (`agy`) — Google Antigravity headless CLI. Install with
+# `agy` once available on your PATH, then run `agy` interactively to
+# authenticate. Verified against agy 1.1.0 (2026-07-08) on Linux.
+# Ringer closes stdin, so only `-p` / `--print` headless mode is suitable.
+# Verified agy -p exits cleanly with stdin closed.
+# `agy models` lists the available model keys; default below uses
+# "Gemini 3.5 Flash (High)". Override per-task via the manifest "model"
+# field, or set model_default to another verified key.
+# If `--project {taskdir}` does not set the working directory reliably on
+# your installed version, point `bin` at engines/agy-ringer.sh instead and
+# drop "--project" from args_template.
+# Uncomment to enable.
+# [engines.agy]
+# bin = "agy"
+# model_default = "Gemini 3.5 Flash (High)"
+# args_template = [
+#   "--project",
+#   "{taskdir}",
+#   "--model",
+#   "{model}",
+#   "--sandbox",
+#   "{access_args}",
+#   "{engine_args}",
+#   "-p",
+#   "{spec}",
+# ]
+# sandbox_args = []
+# full_access_args = ["--dangerously-skip-permissions"]
+# Token output format for agy 1.1.0 not yet verified — leave disabled.
+# token_regex = ""
+
 # For CI, acceptance evals, and trying Ringer without an API bill.
 # [engines.mock]
 # bin = "python3"
