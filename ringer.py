@@ -7404,6 +7404,7 @@ def build_worker_command(
 
 
 ENGINE_INSTALL_HINTS = {
+    "claude": "install it with `npm install -g @anthropic-ai/claude-code`, then run `claude` interactively to authenticate",
     "codex": "install it with `npm install -g @openai/codex` (or `brew install --cask codex`), then run `codex login`",
     "opencode": "install it with `curl -fsSL https://opencode.ai/install | bash`, then run `opencode auth login`",
 }

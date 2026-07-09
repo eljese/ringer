@@ -142,7 +142,7 @@ For CI and evals, `config.sample.toml` includes `[engines.mock]` so the enforcem
 
 ![Identical workers, each under its own light](docs/engines.png)
 
-Ringer ships with three worker lanes: **Codex CLI** is the built-in default, and `config.sample.toml` carries verified engine blocks for **Grok Build CLI** (works as-is once you `grok login`) and **OpenCode + OpenRouter** (one edit: point `bin` at the sandbox wrapper in your clone). Anything else with a headless CLI is a config block away:
+Ringer ships with five worker lanes: **Codex CLI** is the built-in default, and `config.sample.toml` carries verified engine blocks for **Grok Build CLI** (works as-is once you `grok login`), **OpenCode + OpenRouter** (one edit: point `bin` at the sandbox wrapper in your clone), **Antigravity CLI (`agy`)** (works as-is once `agy` is on your PATH and you've signed in interactively), and **Claude Code** (works as-is once you `claude` interact to sign in; `--sandbox` is the default and the only safe mode). Anything else with a headless CLI is a config block away:
 
 ```toml
 [engines.mymodel]
@@ -193,6 +193,37 @@ grok login
 ```
 
 Route with per-task `"engine": "grok"` and pick the model with `"model": "grok-build"` or `"model": "grok-composer-2.5-fast"` (the shipped default — the speed pick). Grok brings its own OS sandbox on macOS (profile `workspace`: read everywhere, writes confined to the task dir, temp, and `~/.grok`), and its JSON output exposes no token counts — plan-billed workers report cost as included in plan.
+
+### The agy lane
+
+Antigravity CLI (`agy`) is Google's headless agent harness for Gemini models — a third flat-rate worker lane once you've signed in:
+
+```bash
+# 1) Install (agy ships as a standalone CLI; put it on your PATH)
+#    See https://github.com/google/antigravity-cli for the latest install
+
+# 2) Sign in — `agy` interactively, then exit
+
+# 3) In ~/.config/ringer/config.toml, uncomment [engines.agy]
+```
+
+Route with per-task `"engine": "agy"`. `model_default` is `"Gemini 3.5 Flash (High)"` (the shipped default — the speed pick); override per task with `"model"` set to any key listed by `agy models`. `agy -p` exits cleanly with stdin closed. **Sandbox is the default and the only safe option** (`agy --sandbox` always appears in `args_template`); the engine's `full_access_args` flips to `--dangerously-skip-permissions` so `allow_full_access` remains the single escape hatch in the orchestrator. Use `--add-dir {taskdir}` (NOT `--project` — `--project` is a project-ID token in agy 1.1.0 and does not pin filesystem writes). Verified against agy 1.1.0 (2026-07-08) on Linux; see `docs/AGY.md` for the harness-level evidence and the concurrent-run warning.
+
+### The Claude Code lane
+
+Claude Code is the Anthropic CLI for the Sonnet/Opus/Haiku model family — the same engine this very orchestrator is running on:
+
+```bash
+# 1) Install (pick one)
+npm install -g @anthropic-ai/claude-code
+# or: curl -fsSL https://claude.com/install | bash
+
+# 2) Sign in — `claude` interactively, then exit
+
+# 3) In ~/.config/ringer/config.toml, uncomment [engines.claude]
+```
+
+Route with per-task `"engine": "claude"`. `model_default` is `claude-sonnet-4-6` (the shipped default — Anthropic's frontier coding model as of 2026-07); override per task with `"model": "claude-opus-4-7"` or `"model": "claude-haiku-4-5"` for cost-sensitive lanes. `claude --print --output-format json` exits cleanly with stdin closed and exposes token counts (input, output, cache read/write) in the JSON result — Ringer reads those straight into the `swarm_runs` row. **Sandbox is the default and the only safe option** (`--permission-mode acceptEdits` + `--allowedTools "Read Edit Write Glob Grep Bash"`); the engine's `full_access_args` flips to `--dangerously-skip-permissions` so `allow_full_access` remains the single escape hatch in the orchestrator. Verified against `claude 2.1.179` on Linux (2026-07-09); see `docs/CLAUDE-CODE-PROBE-RESULTS.md` for the harness-level evidence (`--add-dir` allow-list semantics, `--print` exit semantics, JSON token schema).
 
 ## Ringside — mission control
 

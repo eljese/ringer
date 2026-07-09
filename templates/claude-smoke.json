@@ -1,0 +1,19 @@
+{
+  "run_name": "claude-smoke",
+  "workdir": "/tmp/ringer-claude-smoke",
+  "max_parallel": 1,
+  "worktrees": false,
+  "tasks": [
+    {
+      "key": "claude-file-create",
+      "engine": "claude",
+      "model": "claude-sonnet-4-6",
+      "spec": "Create a file named claude-smoke.txt in the current working directory. The file must contain exactly this text and nothing else: claude works with ringer",
+      "expect_files": ["claude-smoke.txt"],
+      "check": "printf '%s' 'claude works with ringer' > expected.txt && diff -u expected.txt claude-smoke.txt",
+      "verified": "Smoke: 1-shot file write via Claude Code headless mode. Run via engines/run-claude-smoke.sh to wipe the workdir first.",
+      "task_type": "probe",
+      "timeout_s": 900
+    }
+  ]
+}
