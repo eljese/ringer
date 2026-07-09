@@ -1,8 +1,8 @@
 # Probe results — Claude Code engine lane (2026-07-09)
 
 Resolves the four open questions in `docs/CLAUDE-CODE-ENGINE-PLAN.md`
-via live probes against `claude 2.1.179 (Claude Code)` on the
-operator's box (Linux). This document is the source of truth for the
+via live probes against `claude 2.1.179 (Claude Code)` on a
+clean install (Linux). This document is the source of truth for the
 implementation PR that will follow.
 
 Companion to `docs/CLAUDE-CODE-ENGINE-PLAN.md`. The plan doc
@@ -112,19 +112,18 @@ SessionEnd hook [node "$HOME/.claude/hooks/scripts/session-end.js"] failed: node
 
 Error: Cannot find module '../lib/utils'
 Require stack:
-- /home/eljese/.claude/hooks/scripts/session-end.js
+- $HOME/.claude/hooks/scripts/session-end.js
     at Function._resolveFilename (node:internal/modules/cjs/loader:1383:15)
     ...
-    at Object.<anonymous> (/home/eljese/.claude/hooks/scripts/session-end.js:22:5)
+    at Object.<anonymous> ($HOME/.claude/hooks/scripts/session-end.js:22:5)
     ...
   code: 'MODULE_NOT_FOUND',
-  requireStack: [ '/home/eljese/.claude/hooks/scripts/session-end.js' ]
+  requireStack: [ '$HOME/.claude/hooks/scripts/session-end.js' ]
 }
 ```
 
 The script does `require('../lib/utils')` without an extension; the
-file exists at `~/.claude/hooks/scripts/lib/utils.js`. This is an
-operator-config drift on this box, **not** a `--bare` regression.
+file exists at `~/.claude/hooks/scripts/lib/utils.js`. This is operator-config drift on the install, **not** a `--bare` regression.
 Fixing it (adding `.js` to the require, or rewriting the hook) lives
 outside the ringer repo — file a separate housekeeping task. With
 `--bare` in `args_template`, the noise is suppressed automatically.
@@ -255,9 +254,9 @@ probe source.
 #       because Q3 observed partial --allowedTools honoring on this
 #       CLI build.
 #  --bare (Q3): still pins --add-dir / --permission-mode. Skips
-#       operator-installed SessionEnd hooks (a broken session-end.js
-#       on the operator's box polled stderr on every invocation; --bare
-#       suppresses it). Recommended in args_template for swarm runs.
+#       CLAUDE.md auto-discovery, plugin sync, hook scripts,
+#       attribution, and auto-memory. Useful for swarm runs where
+#       deterministic stderr beats personalization.
 #  --output-format json (Q4): top-level shape carries
 #       usage.output_tokens (snake_case) and modelUsage.*.outputTokens
 #       (camelCase). token_regex below targets the snake_case key.
@@ -342,13 +341,11 @@ cutting the implementation branch.
 
 ## Out-of-scope follow-ups (separate issues, not this PR)
 
-- **`~/.claude/hooks/scripts/session-end.js` broken `require`** — the
-  operator-installed hook fails on shutdown with
-  `Cannot find module '../lib/utils'`. Fix is operator-side: add the
-  `.js` extension (or fix the hooks installer that produced the file).
-  The `--bare` flag in our `args_template` suppresses the stderr
-  noise in the meantime. Filed as a separate housekeeping item
-  outside the ringer repo.
+- **Operator-installed hook script drift** — a `SessionEnd` hook that
+  fails on shutdown (e.g. a missing `require` extension) prints a
+  stack trace to stderr. `--bare` in `args_template` skips hooks
+  entirely so the stderr stays deterministic. Fixing the hook is
+  operator-side; out of scope for this PR.
 - **`claude models` subcommand doesn't exist** — anyone wanting a
   runtime list of available model IDs has to probe by ID. The probe
   pass above is the floor; surface in docs/CLAUDE-CODE.md as a note.
