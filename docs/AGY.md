@@ -30,9 +30,23 @@ agy -p "Reply with exactly: agy-headless-ok" < /dev/null   # exits 0, prints agy
 ```
 
 `--project {taskdir}` points `agy` at the task directory so it writes inside it.
-If your installed `agy` ignores `--project`, swap `bin` for the optional wrapper
+If your installed `agy` ignores `--project`, swap `bin` for the shipped wrapper
 `engines/agy-ringer.sh` (committed alongside this doc) which `cd`s into the
-task dir before exec'ing `agy`.
+task dir before exec'ing `agy`. When you switch to the wrapper:
+
+- Use an **absolute** path for `bin` (Ringer launches workers with
+  `cwd=taskdir`, so a relative path would not resolve).
+- Drop `"--project"` from `args_template` — the wrapper handles directory
+  isolation via `cd`. The replacement template looks like:
+  ```
+  args_template = [
+    "{taskdir}",
+    "--model", "{model}",
+    "--sandbox", "{access_args}",
+    "{engine_args}",
+    "-p", "{spec}",
+  ]
+  ```
 
 ## Permission prompts
 
