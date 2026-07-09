@@ -115,8 +115,13 @@ token_regex = "tokens\\s+used\\s*:?\\s*([0-9][0-9,]*)"
 # the bypass is impossible regardless of what the worker prompt says.
 # This matches the same belt-and-suspenders model the codex block uses.
 # If `--project {taskdir}` does not set the working directory reliably on
-# your installed version, point `bin` at engines/agy-ringer.sh instead and
-# drop "--project" from args_template.
+# your installed version (verified broken on agy 1.1.0 — agy writes to
+# ~/.gemini/antigravity-cli/scratch/ regardless), point `bin` at
+# engines/agy-ringer.sh instead and drop "--project" from args_template.
+# The wrapper cds into {taskdir} and, after agy exits, mirrors any files
+# agy wrote to its scratch dir into {taskdir} (mtime-filtered, no-clobber).
+# See docs/AGY.md "Engine wrapper" for the full contract and the
+# concurrent-run warning.
 # Uncomment to enable.
 # [engines.agy]
 # bin = "agy"

@@ -34,23 +34,60 @@ agy -p "Reply with exactly: agy-headless-ok" < /dev/null   # exits 0, prints agy
 > **Verified 2026-07-08 against agy 1.1.0:** even with `--project
 > {taskdir}`, agy writes the file to
 > `~/.gemini/antigravity-cli/scratch/`, not to the task directory. The
-> wrapper fallback (`engines/agy-ringer.sh`) `cd`s into the task dir,
-> but agy ignores the cwd for filesystem writes too. End result:
-> `expect_files` and any `check` against files written by agy land in
-> the scratch dir, not the taskdir.
+> `engines/agy-ringer.sh` wrapper handles this for the common
+> single-file case: after agy exits, files written to the scratch
+> dir DURING this invocation (mtime newer than a per-run marker) are
+> mirrored into `{taskdir}`. See "Engine wrapper" below for the
+> contract and the concurrent-run warning.
 
-That means the shipped smoke manifest will fail until one of these
-becomes true:
+The cleanest fix is still upstream: agy 1.2+ shipping a real `--cwd`
+flag. Until then, use the wrapper for file-creation tasks (one
+`agy` invocation per taskdir at a time) and agy direct for
+read-only review/plan tasks.
 
-- agy ships a real cwd / working-directory flag (currently it does
-  not), or
-- someone writes a wrapper that **also copies the scratch file** into
-  the taskdir after agy exits. This is fragile because the scratch
-  filename is global, so concurrent runs collide.
+## Engine wrapper
 
-The cleanest fix is upstream: agy 1.2+ scope. Until then, do not rely
-on agy writing into the taskdir; use it for read-only review tasks or
-for work that produces plan-style output only.
+`engines/agy-ringer.sh` is the ringer wrapper that mitigates the cwd
+gap above for the common single-file case. Use it as the
+`[engines.agy].bin` when agy will create or modify files.
+
+```toml
+[engines.agy]
+bin = "/absolute/path/to/ringer/engines/agy-ringer.sh"
+args_template = [
+  "{taskdir}",         # consumed as $1, used for cd
+  "--model", "{model}",
+  "--sandbox", "{access_args}",
+  "{engine_args}",
+  "-p", "{spec}",
+]
+```
+
+Behaviour:
+
+- `cd`s into `{taskdir}` before invoking agy (harmless on its own;
+  agy ignores cwd for filesystem writes).
+- After agy exits, mirrors any file in
+  `~/.gemini/antigravity-cli/scratch/` whose mtime is newer than an
+  invocation-start marker into `{taskdir}`, preserving subpaths
+  (`scratch/scripts/foo.py` → `{taskdir}/scripts/foo.py`).
+- Default policy is **no-clobber**: a file already in `{taskdir}` is
+  never overwritten. Force-overwrite with `AGY_RINGER_FORCE_BACK_COPY=1`.
+- Skip the mirror entirely for read-only review tasks with
+  `AGY_RINGER_NO_BACK_COPY=1`.
+- Override the scratch root (e.g. on a non-standard install) with
+  `AGY_RINGER_SCRATCH_DIR=/path/to/scratch`.
+- Emits a one-line summary on stderr:
+  `agy-ringer: copied=N skipped=K missing=M from <scratch>`.
+- Propagates agy's exit code; per-attempt Ringer retry is unchanged.
+
+**Concurrent-run warning.** The scratch dir is global per user.
+Two parallel agy tasks will both mirror their new files into their
+own taskdirs; if both write the same basename, the no-clobber policy
+keeps whichever the first invocation landed first. If you need
+strict isolation, run agy tasks with `--max-parallel 1` until
+upstream ships `--cwd`. The wrapper is regression-tested under
+`tests/test_agy_ringer.py`.
 
 ## Permission prompts
 
