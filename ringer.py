@@ -7842,6 +7842,11 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def ringer_hook_command(action: str) -> str:
+    hook_path = repo_root() / "hooks" / "ringer_nudge.py"
+    return f"python3 {shlex.quote(str(hook_path))} {action}"
+
+
 def claude_root(project: bool) -> Path:
     return (Path.cwd() if project else Path.home()) / ".claude"
 
@@ -7850,9 +7855,27 @@ def ringer_skill_source() -> Path:
     return repo_root() / ".claude" / "skills" / "ringer" / "SKILL.md"
 
 
-def ringer_hook_command(action: str) -> str:
-    hook_path = repo_root() / "hooks" / "ringer_nudge.py"
-    return f"python3 {shlex.quote(str(hook_path))} {action}"
+def codex_root(project: bool) -> Path:
+    return (Path.cwd() if project else Path.home()) / ".codex"
+
+
+def codex_config_path(project: bool) -> Path:
+    return codex_root(project) / "config.toml"
+
+
+def codex_plugin_source() -> Path:
+    """Repo-bundled plugin scaffold at ringer/plugins/ringer/."""
+    return repo_root() / "plugins" / "ringer"
+
+
+def codex_plugin_target(project: bool) -> Path:
+    """User-side install target: ~/.codex/plugins/ringer/ (or ./.codex/plugins/ringer/)."""
+    return codex_root(project) / "plugins" / "ringer"
+
+
+def codex_cli_present() -> bool:
+    """Return True if the `codex` binary is discoverable on PATH."""
+    return shutil.which("codex") is not None
 
 
 def backup_file(path: Path) -> Path | None:
@@ -8094,7 +8117,33 @@ def remove_ringer_hooks(settings: dict[str, Any]) -> int:
     return removed
 
 
-def install_agent(project: bool = False) -> int:
+def install_agent(
+    project: bool = False,
+    install_claude: bool = True,
+    install_codex: bool = True,
+) -> int:
+    rc = 0
+    if install_claude:
+        rc |= _install_agent_claude(project)
+    if install_codex:
+        rc |= _install_agent_codex(project)
+    return rc
+
+
+def uninstall_agent(
+    project: bool = False,
+    uninstall_claude: bool = True,
+    uninstall_codex: bool = True,
+) -> int:
+    rc = 0
+    if uninstall_claude:
+        rc |= _uninstall_agent_claude(project)
+    if uninstall_codex:
+        rc |= _uninstall_agent_codex(project)
+    return rc
+
+
+def _install_agent_claude(project: bool) -> int:
     root = claude_root(project)
     skill_source = ringer_skill_source()
     skill_target = root / "skills" / "ringer" / "SKILL.md"
@@ -8131,7 +8180,7 @@ def install_agent(project: bool = False) -> int:
     return 0
 
 
-def uninstall_agent(project: bool = False) -> int:
+def _uninstall_agent_claude(project: bool) -> int:
     root = claude_root(project)
     settings_path = root / "settings.json"
     removed_hooks = 0
@@ -8152,6 +8201,117 @@ def uninstall_agent(project: bool = False) -> int:
     print(f"Hooks removed: {removed_hooks}")
     print(f"Skill removed: {'yes' if removed_skill else 'no'}")
     return 0
+
+
+def _install_agent_codex(project: bool) -> int:
+    """Install the ringer Codex plugin at user or project scope.
+
+    Returns 0 even when the codex CLI is not on PATH (skips with a friendly
+    print). Raises ValueError only when the repo-bundled plugin scaffold
+    or the canonical SKILL.md is missing.
+    """
+    if not codex_cli_present():
+        print(
+            "Codex CLI not found on PATH; skipping Codex install. "
+            "(Use --no-codex to silence.)"
+        )
+        return 0
+
+    source = codex_plugin_source()
+    target = codex_plugin_target(project)
+    if not source.exists():
+        raise ValueError(f"ringer codex plugin source not found: {source}")
+
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(source, target)
+
+    real_command = ringer_hook_command("pre-bash")
+    _rewrite_plugin_hook_command(target / "hooks.json", real_command)
+
+    skill_source = ringer_skill_source()
+    skill_target = target / "skills" / "ringer" / "SKILL.md"
+    if not skill_source.exists():
+        raise ValueError(f"ringer skill source not found: {skill_source}")
+    skill_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(skill_source, skill_target)
+
+    config_path = codex_config_path(project)
+    settings = load_toml_settings(config_path)
+    registered = _register_ringer_plugin(settings)
+    if registered or not config_path.exists():
+        write_toml_settings(config_path, settings)
+
+    scope = "project" if project else "user"
+    print(f"Installed ringer codex plugin for {scope} scope.")
+    print(f"Plugin: {target}")
+    if registered:
+        print(f"Registered [plugins.ringer] in {config_path}")
+    else:
+        print(f"[plugins.ringer] already registered in {config_path}")
+    return 0
+
+
+def _uninstall_agent_codex(project: bool) -> int:
+    target = codex_plugin_target(project)
+    removed_plugin = False
+    if target.exists():
+        shutil.rmtree(target)
+        removed_plugin = True
+
+    config_path = codex_config_path(project)
+    removed_entry = False
+    if config_path.exists():
+        settings = load_toml_settings(config_path)
+        removed_entry = _remove_ringer_plugin(settings)
+        if removed_entry:
+            write_toml_settings(config_path, settings)
+
+    scope = "project" if project else "user"
+    print(f"Uninstalled ringer codex plugin for {scope} scope.")
+    print(f"Plugin removed: {'yes' if removed_plugin else 'no'}")
+    print(f"[plugins.ringer] entry removed: {'yes' if removed_entry else 'no'}")
+    return 0
+
+
+def _rewrite_plugin_hook_command(hooks_json_path: Path, real_command: str) -> None:
+    """Replace the __RINGER_NUDGE_PATH__ placeholder in the plugin's hooks.json."""
+    payload = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    for group in hooks.get("PreToolUse", []):
+        if not isinstance(group, dict):
+            continue
+        for handler in group.get("hooks", []):
+            if isinstance(handler, dict) and handler.get("type") == "command":
+                handler["command"] = real_command
+    hooks_json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _register_ringer_plugin(settings: dict[str, Any]) -> bool:
+    """Add or update [plugins.ringer] enabled = true. Returns True if changed."""
+    plugins = settings.setdefault("plugins", {})
+    if not isinstance(plugins, dict):
+        raise ValueError("config.toml [plugins] must be a table")
+    existing = plugins.get("ringer")
+    if isinstance(existing, dict) and existing.get("enabled") is True:
+        return False
+    plugins["ringer"] = {"enabled": True}
+    return True
+
+
+def _remove_ringer_plugin(settings: dict[str, Any]) -> bool:
+    """Remove [plugins.ringer] from config.toml. Returns True if removed."""
+    plugins = settings.get("plugins")
+    if not isinstance(plugins, dict):
+        return False
+    if "ringer" not in plugins:
+        return False
+    del plugins["ringer"]
+    if not plugins:
+        del settings["plugins"]
+    return True
 
 
 async def run_manifest(
@@ -8340,11 +8500,77 @@ def build_parser() -> argparse.ArgumentParser:
     )
     demo_parser.add_argument("--dry-run", action="store_true", help="print the demo plan without spawning codex")
 
-    install_parser = subparsers.add_parser("install-agent", help="install the ringer Claude Code skill and hooks")
-    install_parser.add_argument("--project", action="store_true", help="install into ./.claude instead of ~/.claude")
+    install_parser = subparsers.add_parser(
+        "install-agent",
+        help="install the ringer skill + hooks for Claude Code and/or the ringer plugin for Codex",
+    )
+    install_parser.add_argument(
+        "--project",
+        action="store_true",
+        help="install into ./.{claude,codex} instead of ~/.{claude,codex}",
+    )
+    install_parser.add_argument(
+        "--claude",
+        dest="claude",
+        action="store_true",
+        default=None,
+        help="install for Claude Code (default: yes)",
+    )
+    install_parser.add_argument(
+        "--no-claude",
+        dest="claude",
+        action="store_false",
+        help="skip Claude Code install",
+    )
+    install_parser.add_argument(
+        "--codex",
+        dest="codex",
+        action="store_true",
+        default=None,
+        help="install for Codex CLI (default: yes)",
+    )
+    install_parser.add_argument(
+        "--no-codex",
+        dest="codex",
+        action="store_false",
+        help="skip Codex install",
+    )
 
-    uninstall_parser = subparsers.add_parser("uninstall-agent", help="remove the ringer Claude Code skill and hooks")
-    uninstall_parser.add_argument("--project", action="store_true", help="remove from ./.claude instead of ~/.claude")
+    uninstall_parser = subparsers.add_parser(
+        "uninstall-agent",
+        help="remove the ringer skill + hooks for Claude Code and/or the ringer plugin for Codex",
+    )
+    uninstall_parser.add_argument(
+        "--project",
+        action="store_true",
+        help="remove from ./.{claude,codex} instead of ~/.{claude,codex}",
+    )
+    uninstall_parser.add_argument(
+        "--claude",
+        dest="claude",
+        action="store_true",
+        default=None,
+        help="uninstall for Claude Code (default: yes)",
+    )
+    uninstall_parser.add_argument(
+        "--no-claude",
+        dest="claude",
+        action="store_false",
+        help="skip Claude Code uninstall",
+    )
+    uninstall_parser.add_argument(
+        "--codex",
+        dest="codex",
+        action="store_true",
+        default=None,
+        help="uninstall for Codex CLI (default: yes)",
+    )
+    uninstall_parser.add_argument(
+        "--no-codex",
+        dest="codex",
+        action="store_false",
+        help="skip Codex uninstall",
+    )
     return parser
 
 
@@ -8356,9 +8582,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "install-agent":
-            return install_agent(project=args.project)
+            return install_agent(
+                project=args.project,
+                install_claude=True if args.claude is None else args.claude,
+                install_codex=True if args.codex is None else args.codex,
+            )
         if args.command == "uninstall-agent":
-            return uninstall_agent(project=args.project)
+            return uninstall_agent(
+                project=args.project,
+                uninstall_claude=True if args.claude is None else args.claude,
+                uninstall_codex=True if args.codex is None else args.codex,
+            )
 
         if args.command == "lint":
             manifest = Manifest.from_path(args.manifest)
