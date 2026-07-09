@@ -31,7 +31,8 @@ agy -p "Reply with exactly: agy-headless-ok" < /dev/null   # exits 0, prints agy
 
 `--project {taskdir}` points `agy` at the task directory so it writes inside it.
 If your installed `agy` ignores `--project`, swap `bin` for the optional wrapper
-`engines/agy-ringer.sh` (see source comments) which `cd`s into the task dir.
+`engines/agy-ringer.sh` (committed alongside this doc) which `cd`s into the
+task dir before exec'ing `agy`.
 
 ## Permission prompts
 
@@ -52,15 +53,18 @@ is available.
 
 ## Smoke test
 
-After enabling the block:
+After enabling the block, use the wrapper launcher that wipes the workdir
+before each invocation (otherwise a previous successful run can leave a stale
+file that masks a new failure):
 
 ```bash
-./ringer.py lint templates/agy-smoke.json
-./ringer.py run templates/agy-smoke.json
+./engines/run-agy-smoke.sh
 ```
 
-The smoke manifest creates `agy-smoke.txt` containing exactly
-`agy works with ringer`. The check exits 0 only when the file matches verbatim.
+The wrapper deletes `/tmp/ringer-agy-smoke` and then runs the manifest. The
+manifest creates `agy-smoke.txt` containing exactly `agy works with ringer`.
+The check exits 0 only when the file matches verbatim in the freshly-wiped
+workdir.
 
 ## Token accounting
 
