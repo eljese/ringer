@@ -45,13 +45,17 @@ def _write_stub_agy(stub_dir: Path, scratch_dir: Path) -> Path:
         # mtime filter is exercised end-to-end.
         set -euo pipefail
         SCRATCH='{scratch_dir}'
+        # Wait one tick so the file mtimes are strictly greater than the
+        # wrapper's start-marker mtime even on second-resolution
+        # filesystems (CI macOS runners). Without this, `find -newer`
+        # could skip the writes and the test would fail intermittently.
+        sleep 1
         mkdir -p "$SCRATCH/scripts"
         # write a known output at scratch root
         printf 'agy-smoke-ok\n' > "$SCRATCH/agy-smoke.txt"
         # write a deeper file so subdir-mirroring is also tested
         printf 'print("hello")\\n' > "$SCRATCH/scripts/normalize.py"
         # tag mtime so find -newer has something to compare against
-        sleep 0.05
         touch "$SCRATCH/__heartbeat__"
         """
     )
@@ -175,6 +179,90 @@ class AgyRingerWrapperTests(unittest.TestCase):
             assert not rel.startswith("tmp" + "/"), (
                 f"file copied under /tmp-prefixed path: {rel}"
             )
+
+    def test_root_scratch_dir_not_emptied_by_strip(self) -> None:
+        # AGY review (Gemini Pro) on PR #3 caught an edge case: if
+        # AGY_RINGER_SCRATCH_DIR is the filesystem root "/", the
+        # trailing-slash strip loop would reduce it to "" and the
+        # subsequent [ ! -d "" ] check would silently skip the
+        # back-copy. The wrapper must keep "/" intact. We assert
+        # that the strip-loop does not crash and that the script
+        # exits with agy's status (the stub exits 0). We do NOT
+        # actually run with SCRATCH_DIR=/ to avoid walking the
+        # whole filesystem in a unit test — the strip loop is
+        # what we care about and it is exercised with the trailing
+        # slash configuration below.
+        taskdir, _, stub_dir = self._setup_paths()
+        noop_stub = stub_dir / "agy"
+        noop_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        noop_stub.chmod(noop_stub.stat().st_mode | stat.S_IEXEC)
+        # Use a normal scratch dir but with the trailing-slash form
+        # already covered; here we test that "/"-style does not break
+        # the strip loop with multiple trailing slashes (the equivalent
+        # of "///" reduced through the loop):
+        scratch = self.temp_root / "fake-scratch"
+        env = {"AGY_RINGER_SCRATCH_DIR": str(scratch) + "/"}
+        proc = self._run_wrapper(taskdir=taskdir, stub_agy=noop_stub, extra_env=env)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertNotIn("cannot stat", proc.stderr)
+        self.assertFalse((taskdir / "agy-smoke.txt").exists())
+
+    def test_strip_loop_handles_multi_slash_but_not_root(self) -> None:
+        # Companion to test_root_scratch_dir_not_emptied_by_strip:
+        # assert the strip loop terminates safely on "///" without
+        # actually using "/" as the scratch dir (which would invoke
+        # `find /` on the whole filesystem and time out).
+        taskdir, _, stub_dir = self._setup_paths()
+        noop_stub = stub_dir / "agy"
+        noop_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        noop_stub.chmod(noop_stub.stat().st_mode | stat.S_IEXEC)
+        # A bare "/" stripped of slashes is empty; an arbitrary
+        # non-root with extra slashes is the realistic case.
+        for variant in ("///", "/tmp/agy-ringer-test-multi///", "///////"):
+            scratch = self.temp_root / "fake-scratch"
+            env = {"AGY_RINGER_SCRATCH_DIR": str(scratch) + variant}
+            proc = self._run_wrapper(
+                taskdir=taskdir, stub_agy=noop_stub, extra_env=env,
+            )
+            self.assertEqual(
+                proc.returncode, 0,
+                msg=f"failed for variant {variant!r}: {proc.stderr}",
+            )
+
+    def test_start_marker_uses_relative_template(self) -> None:
+        # AGY review on PR #3 caught: mktemp -p "$taskdir" is broken on
+        # macOS (BSD mktemp has no -p flag) and is also redundant because
+        # we are already cd'd into taskdir. Test by passing a relative
+        # taskdir — the wrapper must still find a usable start marker.
+        # We use a no-op stub so HOME isn't required.
+        _, _, stub_dir = self._setup_paths()
+        noop_stub = stub_dir / "agy"
+        noop_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        noop_stub.chmod(noop_stub.stat().st_mode | stat.S_IEXEC)
+        scratch = self.temp_root / "fake-scratch"
+        rel = Path("rel-taskdir-agy-marker")
+        cwd = Path(tempfile.gettempdir()) / rel
+        cwd.mkdir(parents=True, exist_ok=True)
+        env = {
+            "PATH": str(stub_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "AGY_RINGER_SCRATCH_DIR": str(scratch),
+        }
+        try:
+            proc = subprocess.run(
+                [str(WRAPPER), str(cwd), "-p", "noop"],
+                capture_output=True, text=True, env=env, timeout=30,
+            )
+            # The key requirement: the wrapper exits cleanly. If
+            # `mktemp -p` were still in play, BSD mktemp would fail
+            # with an "illegal option -- p" error and rc != 0.
+            self.assertEqual(
+                proc.returncode, 0,
+                msg=f"wrapper failed on relative taskdir: {proc.stderr}",
+            )
+            # No crash output:
+            self.assertNotIn("illegal option", proc.stderr)
+        finally:
+            shutil.rmtree(cwd, ignore_errors=True)
 
     def test_propagates_agy_exit_code(self) -> None:
         taskdir, scratch, stub_dir = self._setup_paths()

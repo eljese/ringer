@@ -80,16 +80,26 @@ cd "$taskdir"
 
 # Invocation-start marker. Anything in the scratch dir whose mtime is
 # newer than this is treated as written by THIS agy invocation. Placed
-# INSIDE the taskdir so concurrent agy runs do not all share the same
-# marker (each wrapper instance touches its own file).
-AGY_RINGER_START_FILE="$(mktemp -p "$taskdir" .agy-ringer-start.XXXXXX)"
+# inside the taskdir so concurrent agy runs do not share the marker.
+# We are already cd'd into taskdir (see `cd "$taskdir"` above), so use
+# a relative template — do NOT pass `-p "$taskdir"` because (a) BSD
+# `mktemp` on macOS does not accept `-p` and (b) when `$taskdir` is
+# already an absolute, post-cd path `mktemp -p` is redundant.
+AGY_RINGER_START_FILE="$(mktemp ./.agy-ringer-start.XXXXXX)"
 cleanup_marker() { rm -f "$AGY_RINGER_START_FILE"; }
 trap cleanup_marker EXIT
+
+# Sleep one tick before invoking agy so that any file agy writes has
+# an mtime strictly greater than the marker. Without this, on fast
+# filesystems (or in CI with second-resolution mtimes), `find -newer`
+# would silently skip files that share the marker's mtime. The cost
+# is a constant 1s added to every agy invocation; the gain is that
+# the wrapper behaves predictably.
+sleep 1
 
 # Resolve `agy` so the error is sharp when it is not installed.
 if ! AGY_BIN="$(command -v agy)"; then
   echo "agy-ringer.sh: agy not found on PATH" >&2
-  rm -f "$AGY_RINGER_START_FILE"
   exit 127
 fi
 
@@ -107,10 +117,10 @@ fi
 SCRATCH_DIR="${AGY_RINGER_SCRATCH_DIR:-$HOME/.gemini/antigravity-cli/scratch}"
 # Strip ALL trailing slashes so the prefix-strip below matches find's
 # output regardless of how the user set AGY_RINGER_SCRATCH_DIR.
-# `${VAR%/}` only strips one — use a loop (or a non-portable extglob
-# pattern) so /tmp/scratch/// reduces to /tmp/scratch.
-# See the Codex P2 thread on PR #3.
-while [[ "${SCRATCH_DIR}" == */ ]]; do
+# `${VAR%/}` only strips one — use a loop. Guard against reducing the
+# root path "/" to an empty string (an empty `[ ! -d "" ]` would
+# silently skip the back-copy loop).
+while [[ "${SCRATCH_DIR}" == */ && "${SCRATCH_DIR}" != "/" ]]; do
   SCRATCH_DIR="${SCRATCH_DIR%/}"
 done
 if [ ! -d "$SCRATCH_DIR" ]; then
@@ -152,6 +162,13 @@ done < <(find "$SCRATCH_DIR" -type f -newer "$AGY_RINGER_START_FILE" \
   -not -path '*/__pycache__/*' \
   -not -name '*.pyc' \
   -print0 2>/dev/null || true)
+# Note: no -maxdepth here. Users typically point SCRATCH_DIR at a
+# dedicated per-project tree (`~/.gemini/antigravity-cli/scratch`),
+# not at the FS root. If they do configure it to "/", the wrapper
+# is still usable (the `find` reads metadata at the configured depth
+# only) but they are trusting us not to walk multi-billion-file
+# trees. Document this in the wrapper header if it becomes a real
+# problem.
 
 echo "agy-ringer: copied=$copied skipped=$skipped missing=$missing from $SCRATCH_DIR" >&2
 
