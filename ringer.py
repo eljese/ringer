@@ -79,6 +79,10 @@ FALLBACK_HARVEST_SUFFIXES = (
 FALLBACK_HARVEST_MAX_FILES = 8
 SHEPHERD_MODEL = f"none ({TOOL_NAME}.py)"
 VERIFY_METHOD = "executed-check"
+RESERVED_FIXTURE_MODELS = frozenset(
+    {"proven-model", "probation-model", "mock-model", "test-model"}
+)
+UNATTRIBUTED_MODEL_DISPLAY = "(unattributed legacy rows)"
 CSP_META_TAG = (
     '<meta http-equiv="Content-Security-Policy" '
     'content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:">'
@@ -1959,7 +1963,9 @@ def catalog_explore_candidates(
     candidates = [
         model
         for model in catalog_models
-        if str(model.get("id", "")) not in tested_models and catalog_model_is_text_candidate(model)
+        if str(model.get("id", "")).strip() not in tested_models
+        and str(model.get("id", "")).strip() not in RESERVED_FIXTURE_MODELS
+        and catalog_model_is_text_candidate(model)
     ]
     return sorted(
         candidates,
@@ -1984,9 +1990,19 @@ def print_model_explore(
     if not groups:
         print("  no local evidence")
     for group in groups:
-        label = "proven" if proven_model_group(group) else "probation"
+        label = (
+            "unranked"
+            if group.get("unattributed")
+            else ("proven" if proven_model_group(group) else "probation")
+        )
+        display = (
+            f"{group.get('model_display') or UNATTRIBUTED_MODEL_DISPLAY} "
+            f"[{group.get('engine') or 'unknown'}]"
+            if group.get("unattributed")
+            else str(group["model"])
+        )
         print(
-            f"  {label:<9} {group['model']} "
+            f"  {label:<9} {display} "
             f"task_type={group['task_type']} tasks={group['tasks']} "
             f"first={group['first_try_pass_rate']:.2f} pass={group['pass_rate']:.2f}"
         )
@@ -4072,13 +4088,13 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
         return String(value || "unknown").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
       }
 
-      function groupsFor(model) {
+      function groupsFor(bucketId) {
         const groups = Array.isArray(payload?.groups) ? payload.groups : [];
-        return groups.filter(group => String(group?.model || "") === model);
+        return groups.filter(group => String(group?.bucket_id || "") === bucketId);
       }
 
-      function breakdown(model) {
-        const groups = groupsFor(model);
+      function breakdown(bucketId) {
+        const groups = groupsFor(bucketId);
         if (!groups.length) return '<div class="empty">No per-task breakdown recorded for this model.</div>';
         const cells = [
           '<div class="breakdown-head">Task type</div>',
@@ -4111,17 +4127,20 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
           return;
         }
         const body = [];
+        let rank = 0;
         rows.forEach((row, index) => {
-          const model = String(row.model || "");
-          const expanded = expandedModel === model;
+          const bucketId = String(row.bucket_id || `${row.engine || ""}|${row.model || ""}`);
+          const expanded = expandedModel === bucketId;
           const tierClass = safeClass(row.tier);
+          if (!row.unattributed) rank += 1;
           body.push(
-            `<tr class="model-row${expanded ? " expanded" : ""}" data-model="${html(model)}" tabindex="0">`,
-            `<td class="numeric">${index + 1}</td>`,
+            `<tr class="model-row${expanded ? " expanded" : ""}" data-model="${html(bucketId)}" tabindex="0">`,
+            `<td class="numeric">${row.unattributed ? "—" : rank}</td>`,
             '<td><span class="model-name-cell">',
             `<span class="model-display">${html(row.model_display || row.model || "unknown")}</span>`,
-            `<span class="model-slug mono">${html(row.model || "unknown")}</span>`,
+            `<span class="model-slug mono">${html(row.unattributed ? `engine: ${row.engine || "unknown"}` : (row.model || "unknown"))}</span>`,
             '</span></td>',
+            `<td>${html(row.lab || "(unknown)")}</td>`,
             `<td>${html(row.harness || "unknown")}</td>`,
             `<td>${html(row.access || "unknown")}</td>`,
             `<td><span class="tier-badge ${html(tierClass)}">${html(row.tier || "unknown")}</span></td>`,
@@ -4131,12 +4150,12 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
             `<td>${html(modelDate(row.last_seen))}</td>`,
             '</tr>',
           );
-          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="9">${breakdown(model)}</td></tr>`);
+          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="10">${breakdown(bucketId)}</td></tr>`);
         });
         wrap.innerHTML = [
           '<table class="models-table">',
           '<thead><tr>',
-          '<th class="numeric">Rank</th><th>Model</th><th>Harness</th><th>API/Plan</th><th>Tier</th>',
+          '<th class="numeric">Rank</th><th>Model</th><th>Lab</th><th>Harness</th><th>API/Plan</th><th>Tier</th>',
           '<th class="numeric">Tasks</th><th class="numeric">First-try %</th><th class="numeric">Pass %</th><th>Last used</th>',
           '</tr></thead>',
           `<tbody>${body.join("")}</tbody>`,
@@ -4633,7 +4652,7 @@ class EvalLogger:
             db_row = {
                 key: value
                 for key, value in row.items()
-                if key not in {"model", "task_type", "retry"}
+                if key not in {"model", "reasoning_effort", "task_type", "retry"}
             }
             try:
                 self._conn.execute(
@@ -4753,6 +4772,38 @@ def model_log_row_model(row: dict[str, Any]) -> str:
     return model_log_text(row.get("worker_engine"))
 
 
+def model_log_row_is_unattributed(row: dict[str, Any]) -> bool:
+    return not model_log_text(row.get("model"))
+
+
+def model_log_row_reasoning_effort(row: dict[str, Any]) -> str | None:
+    effort = model_log_text(row.get("reasoning_effort"))
+    return effort or None
+
+
+def model_log_row_is_reserved_fixture(row: dict[str, Any]) -> bool:
+    return model_log_text(row.get("model")) in RESERVED_FIXTURE_MODELS
+
+
+def model_reasoning_effort_keys(rows: list[dict[str, Any]]) -> set[tuple[str, str, bool]]:
+    keys: set[tuple[str, str, bool]] = set()
+    for row in rows:
+        if model_log_row_is_reserved_fixture(row):
+            continue
+        if (
+            not model_log_row_is_unattributed(row)
+            and model_log_row_reasoning_effort(row) is not None
+        ):
+            keys.add(
+                (
+                    model_log_row_engine(row),
+                    model_log_row_model(row),
+                    model_log_row_is_unattributed(row),
+                )
+            )
+    return keys
+
+
 def model_log_row_task_type(row: dict[str, Any]) -> str:
     task_type = model_log_text(row.get("task_type"))
     return task_type or "(untyped)"
@@ -4777,17 +4828,25 @@ def median_int(values: list[int]) -> int | None:
     return (ordered[middle - 1] + ordered[middle]) // 2
 
 
-def model_log_task_base_key(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+def model_log_task_base_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, bool] | None:
     run_id = model_log_text(row.get("run_id"))
     task_key = model_log_text(row.get("task_key"))
     if not run_id or not task_key:
         return None
-    return (run_id, task_key, model_log_row_model(row), model_log_row_task_type(row))
+    unattributed = model_log_row_is_unattributed(row)
+    return (
+        run_id,
+        task_key,
+        model_log_row_model(row),
+        model_log_row_task_type(row),
+        "" if unattributed else (model_log_row_reasoning_effort(row) or ""),
+        unattributed,
+    )
 
 
 def group_model_log_tasks(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     grouped: list[list[dict[str, Any]]] = []
-    active_by_key: dict[tuple[str, str, str, str], int] = {}
+    active_by_key: dict[tuple[str, str, str, str, str, bool], int] = {}
     for row in rows:
         key = model_log_task_base_key(row)
         if key is not None and model_log_row_is_retry(row) and key in active_by_key:
@@ -4847,7 +4906,8 @@ def aggregate_model_log_rows(
     task_type: str | None = None,
     model: str | None = None,
 ) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    groups: dict[tuple[str, str, str, str, bool], dict[str, Any]] = {}
+    effort_keys = model_reasoning_effort_keys(rows)
     for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
             task_rows,
@@ -4858,18 +4918,35 @@ def aggregate_model_log_rows(
         )
         first = ordered[0]
         final = ordered[-1]
+        if model_log_row_is_reserved_fixture(final):
+            continue
+        group_engine = model_log_row_engine(final)
         group_model = model_log_row_model(final)
         group_task_type = model_log_row_task_type(final)
+        unattributed = model_log_row_is_unattributed(final)
+        reasoning_effort = None if unattributed else model_log_row_reasoning_effort(final)
         if model is not None and group_model != model:
             continue
         if task_type is not None and group_task_type != task_type:
             continue
-        key = (group_model, group_task_type)
+        key = (
+            group_engine,
+            group_model,
+            group_task_type,
+            reasoning_effort or "",
+            unattributed,
+        )
         group = groups.setdefault(
             key,
             {
+                "engine": group_engine,
                 "model": group_model,
                 "task_type": group_task_type,
+                "reasoning_effort": reasoning_effort,
+                "show_reasoning_effort": (
+                    (group_engine, group_model, unattributed) in effort_keys
+                ),
+                "unattributed": unattributed,
                 "tasks": 0,
                 "attempts": 0,
                 "passed": 0,
@@ -4914,8 +4991,12 @@ def aggregate_model_log_rows(
         group["median_tokens"] = median_int(group["_tokens"])
         finalized.append(
             {
+                "engine": group["engine"],
                 "model": group["model"],
                 "task_type": group["task_type"],
+                "reasoning_effort": group["reasoning_effort"],
+                "show_reasoning_effort": group["show_reasoning_effort"],
+                "unattributed": group["unattributed"],
                 "tasks": group["tasks"],
                 "attempts": group["attempts"],
                 "passed": group["passed"],
@@ -4930,10 +5011,13 @@ def aggregate_model_log_rows(
     return sorted(
         finalized,
         key=lambda item: (
+            1 if item["unattributed"] else 0,
             item["task_type"],
             -item["pass_rate"],
             -item["first_try_pass_rate"],
+            item["engine"],
             item["model"],
+            item["reasoning_effort"] or "",
         ),
     )
 
@@ -4968,8 +5052,10 @@ def should_use_read_model_db(
 @dataclass(frozen=True)
 class ModelIdentity:
     model_display: str
+    lab: str
     harness: str
     access: str
+    alias: bool = False
     confidence: str = ""
     source: str = ""
 
@@ -4989,8 +5075,11 @@ class ModelIdentityRegistry:
             return identity
         meta = self.engine_meta.get(engine_key)
         if engine_key == "opencode" and raw_model_key.startswith("openrouter/"):
+            slug = raw_model_key.removeprefix("openrouter/")
+            org = slug.split("/", 1)[0] if "/" in slug else ""
             return ModelIdentity(
-                model_display=raw_model_key.removeprefix("openrouter/"),
+                model_display=slug,
+                lab=f"{org}?" if org else "(unknown)",
                 harness=(meta.harness if meta else "OpenCode"),
                 access=(meta.access if meta else "OpenRouter API"),
                 confidence="fallback",
@@ -4999,6 +5088,7 @@ class ModelIdentityRegistry:
         if meta is not None and lookup_key:
             return ModelIdentity(
                 model_display=lookup_key,
+                lab="(unknown)",
                 harness=meta.harness,
                 access=meta.access,
                 confidence="fallback",
@@ -5007,6 +5097,7 @@ class ModelIdentityRegistry:
         unknown = engine_key or "unknown"
         return ModelIdentity(
             model_display=unknown,
+            lab="(unknown)",
             harness=unknown,
             access="unknown",
             confidence="unknown",
@@ -5043,6 +5134,7 @@ def load_model_identity_registry(path: Path | None = None) -> ModelIdentityRegis
             defaults[engine] = default_key
         engine_meta[engine] = ModelIdentity(
             model_display=engine,
+            lab="(unknown)",
             harness=harness,
             access=access,
             confidence="engine",
@@ -5059,8 +5151,10 @@ def load_model_identity_registry(path: Path | None = None) -> ModelIdentityRegis
                 continue
             identities[(engine, model_key)] = ModelIdentity(
                 model_display=model_log_text(raw_model.get("display")) or model_key,
+                lab=model_log_text(raw_model.get("lab")) or "(unknown)",
                 harness=harness,
                 access=access,
+                alias=bool(raw_model.get("alias", False)),
                 confidence=model_log_text(raw_model.get("confidence")),
                 source=model_log_text(raw_model.get("source")),
             )
@@ -5071,12 +5165,24 @@ def model_log_row_engine(row: dict[str, Any]) -> str:
     return model_log_text(row.get("worker_engine") if "worker_engine" in row else row.get("engine"))
 
 
-def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) -> dict[str, str]:
+def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) -> dict[str, Any]:
+    if model_log_row_is_unattributed(row):
+        engine = model_log_row_engine(row)
+        meta = registry.engine_meta.get(engine)
+        return {
+            "model_display": UNATTRIBUTED_MODEL_DISPLAY,
+            "lab": "(unknown)",
+            "harness": meta.harness if meta else (engine or "unknown"),
+            "access": meta.access if meta else "unknown",
+            "alias": False,
+        }
     identity = registry.resolve(model_log_row_engine(row), model_log_text(row.get("model")))
     return {
         "model_display": identity.model_display,
+        "lab": identity.lab,
         "harness": identity.harness,
         "access": identity.access,
+        "alias": identity.alias,
     }
 
 
@@ -5102,13 +5208,22 @@ def enrich_model_groups_with_identity(
     *,
     include_task_type: bool,
 ) -> list[dict[str, Any]]:
-    identity_rows: dict[tuple[str, str] | tuple[str], dict[str, str]] = {}
-    latest: dict[tuple[str, str] | tuple[str], str] = {}
+    identity_rows: dict[tuple[Any, ...], dict[str, Any]] = {}
+    latest: dict[tuple[Any, ...], str] = {}
     for row in task_final_rows(rows):
+        if model_log_row_is_reserved_fixture(row):
+            continue
+        group_engine = model_log_row_engine(row)
         group_model = model_log_row_model(row)
         group_task_type = model_log_row_task_type(row)
-        key: tuple[str, str] | tuple[str]
-        key = (group_model, group_task_type) if include_task_type else (group_model,)
+        unattributed = model_log_row_is_unattributed(row)
+        reasoning_effort = None if unattributed else model_log_row_reasoning_effort(row)
+        key: tuple[Any, ...]
+        key = (
+            (group_engine, group_model, group_task_type, reasoning_effort, unattributed)
+            if include_task_type
+            else (group_engine, group_model, reasoning_effort, unattributed)
+        )
         logged_at = model_log_text(row.get("logged_at"))
         if key not in latest or logged_at >= latest[key]:
             latest[key] = logged_at
@@ -5116,9 +5231,20 @@ def enrich_model_groups_with_identity(
     enriched: list[dict[str, Any]] = []
     for group in groups:
         key = (
-            (str(group.get("model") or ""), str(group.get("task_type") or ""))
+            (
+                str(group.get("engine") or ""),
+                str(group.get("model") or ""),
+                str(group.get("task_type") or ""),
+                group.get("reasoning_effort"),
+                bool(group.get("unattributed")),
+            )
             if include_task_type
-            else (str(group.get("model") or ""),)
+            else (
+                str(group.get("engine") or ""),
+                str(group.get("model") or ""),
+                group.get("reasoning_effort"),
+                bool(group.get("unattributed")),
+            )
         )
         item = dict(group)
         item.update(
@@ -5126,9 +5252,26 @@ def enrich_model_groups_with_identity(
                 key,
                 {
                     "model_display": str(group.get("model") or ""),
+                    "lab": "(unknown)",
                     "harness": "unknown",
                     "access": "unknown",
+                    "alias": False,
                 },
+            )
+        )
+        if item.get("show_reasoning_effort") and not item.get("unattributed"):
+            effort = item.get("reasoning_effort") or "(effort unrecorded)"
+            item["model_display"] = f"{item['model_display']} · {effort}"
+        if item.get("unattributed"):
+            # The aggregation helper retains the engine as a legacy grouping key.
+            # Public payloads must not expose harness branding as a model identity.
+            item["model"] = ""
+        item["bucket_id"] = "|".join(
+            (
+                str(item.get("engine") or ""),
+                str(item.get("model") or ""),
+                str(item.get("reasoning_effort") or ""),
+                "unattributed" if item.get("unattributed") else "model",
             )
         )
         enriched.append(item)
@@ -5172,6 +5315,10 @@ def read_model_table_exists(conn: Any, name: str) -> bool:
     return row is not None
 
 
+def read_model_column_exists(conn: Any, table: str, column: str) -> bool:
+    return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
 def create_read_model_schema(conn: Any) -> None:
     schema_table_exists = read_model_table_exists(conn, "schema_version")
     user_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
@@ -5180,7 +5327,7 @@ def create_read_model_schema(conn: Any) -> None:
         row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         if row is not None:
             schema_version = int(row[0])
-    needs_stamp = user_version != 1 or schema_version != 1
+    needs_stamp = user_version != 2 or schema_version != 2
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS schema_version (
@@ -5194,6 +5341,7 @@ def create_read_model_schema(conn: Any) -> None:
             logged_at TEXT,
             engine TEXT,
             model TEXT,
+            reasoning_effort TEXT,
             task_type TEXT,
             retry INTEGER,
             verdict TEXT,
@@ -5229,8 +5377,10 @@ def create_read_model_schema(conn: Any) -> None:
             engine TEXT NOT NULL,
             model_key TEXT NOT NULL,
             model_display TEXT,
+            lab TEXT,
             harness TEXT,
             access TEXT,
+            alias INTEGER,
             confidence TEXT,
             source TEXT,
             PRIMARY KEY (engine, model_key)
@@ -5247,12 +5397,18 @@ def create_read_model_schema(conn: Any) -> None:
         );
         """
     )
+    if not read_model_column_exists(conn, "attempts", "reasoning_effort"):
+        conn.execute("ALTER TABLE attempts ADD COLUMN reasoning_effort TEXT")
+    if not read_model_column_exists(conn, "identity", "lab"):
+        conn.execute("ALTER TABLE identity ADD COLUMN lab TEXT")
+    if not read_model_column_exists(conn, "identity", "alias"):
+        conn.execute("ALTER TABLE identity ADD COLUMN alias INTEGER")
     if needs_stamp:
         conn.executescript(
             """
             DELETE FROM schema_version;
-            INSERT INTO schema_version(version) VALUES (1);
-            PRAGMA user_version = 1;
+            INSERT INTO schema_version(version) VALUES (2);
+            PRAGMA user_version = 2;
             """
         )
 
@@ -5338,6 +5494,7 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
                 model_log_text(row.get("logged_at")),
                 model_log_row_engine(row),
                 model_log_text(row.get("model")),
+                model_log_row_reasoning_effort(row),
                 model_log_text(row.get("task_type")),
                 1 if model_log_row_is_retry(row) else 0,
                 model_log_text(row.get("verdict")),
@@ -5350,10 +5507,10 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
         conn.executemany(
             """
             INSERT INTO attempts (
-                run_id, task_key, logged_at, engine, model, task_type, retry,
+                run_id, task_key, logged_at, engine, model, reasoning_effort, task_type, retry,
                 verdict, duration_ms, worker_tokens, orchestrator
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             payloads,
         )
@@ -5505,17 +5662,19 @@ def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
         conn.executemany(
             """
             INSERT INTO identity (
-                engine, model_key, model_display, harness, access, confidence, source
+                engine, model_key, model_display, lab, harness, access, alias, confidence, source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     engine,
                     model_key,
                     identity.model_display,
+                    identity.lab,
                     identity.harness,
                     identity.access,
+                    1 if identity.alias else 0,
                     identity.confidence,
                     identity.source,
                 )
@@ -5629,8 +5788,10 @@ def load_identity_registry_from_db(conn: Any) -> ModelIdentityRegistry:
             continue
         identities[(engine, model_key)] = ModelIdentity(
             model_display=model_log_text(row["model_display"]) or model_key,
+            lab=model_log_text(row["lab"]) or "(unknown)",
             harness=model_log_text(row["harness"]) or engine,
             access=model_log_text(row["access"]) or "unknown",
+            alias=bool(row["alias"]),
             confidence=model_log_text(row["confidence"]),
             source=model_log_text(row["source"]),
         )
@@ -5641,6 +5802,7 @@ def load_identity_registry_from_db(conn: Any) -> ModelIdentityRegistry:
         defaults[engine] = model_log_text(row["default_model_key"])
         engine_meta[engine] = ModelIdentity(
             model_display=engine,
+            lab="(unknown)",
             harness=model_log_text(row["harness"]) or engine,
             access=model_log_text(row["access"]) or "unknown",
             confidence="engine",
@@ -5657,7 +5819,7 @@ def db_attempt_rows(
 ) -> tuple[list[dict[str, Any]], ModelIdentityRegistry]:
     with contextlib.closing(connect_read_model_db_readonly(db_path)) as conn:
         query = """
-            SELECT run_id, task_key, logged_at, engine, model, task_type, retry,
+            SELECT run_id, task_key, logged_at, engine, model, reasoning_effort, task_type, retry,
                    verdict, duration_ms, worker_tokens, orchestrator
             FROM attempts
         """
@@ -5673,6 +5835,7 @@ def db_attempt_rows(
                 "logged_at": row["logged_at"],
                 "worker_engine": row["engine"],
                 "model": row["model"],
+                "reasoning_effort": row["reasoning_effort"],
                 "task_type": row["task_type"],
                 "retry": bool(row["retry"]),
                 "verdict": row["verdict"],
@@ -5923,7 +6086,8 @@ def aggregate_model_scoreboard_rows(
     task_type: str | None = None,
     model: str | None = None,
 ) -> list[dict[str, Any]]:
-    models: dict[str, dict[str, Any]] = {}
+    models: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
+    effort_keys = model_reasoning_effort_keys(rows)
     for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
             task_rows,
@@ -5934,16 +6098,28 @@ def aggregate_model_scoreboard_rows(
         )
         first = ordered[0]
         final = ordered[-1]
+        if model_log_row_is_reserved_fixture(final):
+            continue
+        group_engine = model_log_row_engine(final)
         group_model = model_log_row_model(final)
         group_task_type = model_log_row_task_type(final)
+        unattributed = model_log_row_is_unattributed(final)
+        reasoning_effort = None if unattributed else model_log_row_reasoning_effort(final)
         if model is not None and group_model != model:
             continue
         if task_type is not None and group_task_type != task_type:
             continue
+        model_key = (group_engine, group_model, reasoning_effort or "", unattributed)
         model_entry = models.setdefault(
-            group_model,
+            model_key,
             {
+                "engine": group_engine,
                 "model": group_model,
+                "reasoning_effort": reasoning_effort,
+                "show_reasoning_effort": (
+                    (group_engine, group_model, unattributed) in effort_keys
+                ),
+                "unattributed": unattributed,
                 "tasks": 0,
                 "attempts": 0,
                 "passed": 0,
@@ -6007,10 +6183,14 @@ def aggregate_model_scoreboard_rows(
                 }
             )
         breakdown_rows.sort(key=lambda item: (-item["tasks"], item["task_type"]))
-        tier = model_scoreboard_tier(tasks_count)
+        tier = "unranked" if entry["unattributed"] else model_scoreboard_tier(tasks_count)
         finalized.append(
             {
+                "engine": entry["engine"],
                 "model": entry["model"],
+                "reasoning_effort": entry["reasoning_effort"],
+                "show_reasoning_effort": entry["show_reasoning_effort"],
+                "unattributed": entry["unattributed"],
                 "tier": tier,
                 "tasks": tasks_count,
                 "attempts": entry["attempts"],
@@ -6059,11 +6239,14 @@ def order_model_scoreboard_rows(
     return sorted(
         rows,
         key=lambda row: (
+            1 if row.get("unattributed") else 0,
             model_scoreboard_tier_rank(str(row.get("tier") or "")),
             -float(row.get("first_try_pass_rate") or 0),
             -float(row.get("pass_rate") or 0),
             model_sort_cost(row, catalog_by_id.get(str(row.get("model") or ""))),
+            str(row.get("engine") or ""),
             str(row.get("model") or ""),
+            str(row.get("reasoning_effort") or ""),
         ),
     )
 
@@ -6593,24 +6776,39 @@ def render_free_watchlist(
 def render_model_table_pair(
     row: dict[str, Any],
     *,
-    rank: int,
+    rank: int | None,
     catalog_model: dict[str, Any] | None,
     notes_sections: dict[str, list[str]],
     notes_path: Path,
 ) -> str:
     model_id = str(row.get("model") or "")
     model_display = str(row.get("model_display") or model_id)
+    lab = str(row.get("lab") or "(unknown)")
     harness = str(row.get("harness") or "unknown")
     access = str(row.get("access") or "unknown")
     notes = model_judgment_notes(model_id, notes_sections)
-    model_id_line = "" if model_id == model_display else f'<div class="model-id">{html_escape(model_id)}</div>'
+    if row.get("unattributed"):
+        model_id_line = (
+            f'<div class="model-id">engine: {html_escape(str(row.get("engine") or "unknown"))} '
+            '· quarantined legacy data</div>'
+        )
+    else:
+        model_id_line = "" if model_id == model_display else f'<div class="model-id">{html_escape(model_id)}</div>'
     tier = str(row.get("tier") or "")
-    return f"""<tr class="model-row" id="model-{html_escape(sanitize_artifact_name(model_id))}">
-      <td class="rank-cell num">{rank}</td>
+    tier_display = "not ranked" if row.get("unattributed") else tier
+    rank_display = "—" if rank is None else str(rank)
+    row_id = (
+        str(row.get("bucket_id") or model_id)
+        if row.get("show_reasoning_effort") or row.get("unattributed")
+        else model_id
+    )
+    return f"""<tr class="model-row" id="model-{html_escape(sanitize_artifact_name(row_id))}">
+      <td class="rank-cell num">{rank_display}</td>
       <td class="model-cell"><div class="model-name">{html_escape(model_display)}</div>{model_id_line}</td>
+      <td>{html_escape(lab)}</td>
       <td>{html_escape(harness)}</td>
       <td>{html_escape(access)}</td>
-      <td><span class="tier-badge {html_escape(tier)}">{html_escape(tier)}</span></td>
+      <td><span class="tier-badge {html_escape(tier)}">{html_escape(tier_display)}</span></td>
       <td class="num">{fmt_int(row.get("tasks"))}</td>
       <td class="num rate-cell">{rate_cell_html(row.get("first_try_pass_rate"))}</td>
       <td class="num rate-cell">{rate_cell_html(row.get("pass_rate"))}</td>
@@ -6618,7 +6816,7 @@ def render_model_table_pair(
       <td>{html_escape(humanized_log_date(row.get("last_seen")))}</td>
     </tr>
     <tr class="detail-row">
-      <td colspan="10">
+      <td colspan="11">
         <details class="model-detail">
           <summary>details for {html_escape(model_display)}</summary>
           <div class="detail-content">
@@ -6656,18 +6854,25 @@ def render_model_scoreboard_html(
     catalog_by_id = catalog_models_by_id(catalog_models)
     ordered = order_model_scoreboard_rows(rows, catalog_by_id)
     generated = generated_at or datetime.now().astimezone().replace(microsecond=0).isoformat()
-    table_rows = "".join(
-        render_model_table_pair(
-            row,
-            rank=index,
-            catalog_model=catalog_by_id.get(str(row.get("model") or "")),
-            notes_sections=notes_sections,
-            notes_path=notes_path,
+    rendered_rows: list[str] = []
+    rank = 0
+    for row in ordered:
+        row_rank = None
+        if not row.get("unattributed"):
+            rank += 1
+            row_rank = rank
+        rendered_rows.append(
+            render_model_table_pair(
+                row,
+                rank=row_rank,
+                catalog_model=catalog_by_id.get(str(row.get("model") or "")),
+                notes_sections=notes_sections,
+                notes_path=notes_path,
+            )
         )
-        for index, row in enumerate(ordered, start=1)
-    )
+    table_rows = "".join(rendered_rows)
     if not table_rows:
-        table_rows = '<tr><td colspan="10" class="muted">No local model evidence matched these filters.</td></tr>'
+        table_rows = '<tr><td colspan="11" class="muted">No local model evidence matched these filters.</td></tr>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -6698,6 +6903,7 @@ def render_model_scoreboard_html(
           <tr>
             <th>Rank</th>
             <th>Model</th>
+            <th>Lab</th>
             <th>Harness</th>
             <th>API/Plan</th>
             <th>Tier</th>
@@ -6713,7 +6919,7 @@ def render_model_scoreboard_html(
     </div>
   </main>
   <footer class="scoreboard-footer">
-    <span>{fmt_int(rows_read)} rows read, {fmt_int(skipped)} skipped lines. Ranking sorts by evidence tier first: proven n&gt;=3, then probation; ties use first-try pass rate, pass rate, then lower estimated cost. Cost estimate assumes logged worker_tokens are split 50/50 between prompt and completion tokens, using the catalog $/M in/out blend.</span>
+    <span>{fmt_int(rows_read)} rows read, {fmt_int(skipped)} skipped lines. Ranking sorts by evidence tier first: proven n&gt;=3, then probation; ties use first-try pass rate, pass rate, then lower estimated cost. Unattributed legacy rows are quarantined at the bottom and are not ranked or tiered. Cost estimate assumes logged worker_tokens are split 50/50 between prompt and completion tokens, using the catalog $/M in/out blend.</span>
   </footer>
 </div>
 </body>
@@ -6765,7 +6971,7 @@ def write_model_scoreboard_html(
 def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list[dict[str, Any]]) -> None:
     print(f"Model log: {path} ({rows_read} rows, {skipped} skipped lines)")
     header = (
-        f"{'task_type':<18} {'model':<32} {'harness':<16} {'tasks':>5} "
+        f"{'task_type':<18} {'model':<32} {'lab':<20} {'harness':<16} {'tasks':>5} "
         f"{'attempts':>8} {'passed':>6} {'failed':>6} {'pass':>6} "
         f"{'first':>6} {'dur_ms':>8} {'tokens':>8} {'last_seen'}"
     )
@@ -6775,10 +6981,13 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
         duration = "" if group["median_duration_ms"] is None else str(group["median_duration_ms"])
         tokens = "" if group["median_tokens"] is None else str(group["median_tokens"])
         display = str(group.get("model_display") or group["model"])
-        if display != group["model"]:
+        if group.get("unattributed"):
+            display = f"{display} [{group.get('engine') or 'unknown'}]"
+        elif display != group["model"]:
             display = f"{display} ({group['model']})"
         print(
             f"{group['task_type']:<18} {shorten(display, 32):<32} "
+            f"{shorten(str(group.get('lab') or '(unknown)'), 20):<20} "
             f"{shorten(str(group.get('harness') or 'unknown'), 16):<16} "
             f"{group['tasks']:>5} {group['attempts']:>8} {group['passed']:>6} "
             f"{group['failed']:>6} {group['pass_rate']:>6.2f} "
@@ -7468,6 +7677,9 @@ class RingerRunner:
             or (engine.model_default if engine else "")
             or effective_model_from_command(runtime.last_worker_command)
         )
+        reasoning_effort = effective_reasoning_effort_from_command(
+            runtime.last_worker_command
+        )
         notes_parts = [
             f"retry={'true' if retrying else 'false'}",
             f"worker_returncode={worker.returncode}",
@@ -7505,6 +7717,7 @@ class RingerRunner:
                 "notes": "\n".join(notes_parts),
                 "orchestrator": self.identity,
                 "model": resolved_model,
+                "reasoning_effort": reasoning_effort,
                 "task_type": runtime.task.task_type,
                 "retry": retrying,
             }
@@ -7733,6 +7946,19 @@ def effective_model_from_command(command: list[str]) -> str:
         if item.startswith("--model="):
             return item.removeprefix("--model=")
     return ""
+
+
+def effective_reasoning_effort_from_command(command: list[str]) -> str | None:
+    """Return an explicitly configured model reasoning effort from worker argv."""
+    for item in command:
+        match = re.search(
+            r"(?:^|[=,\s])model_reasoning_effort\s*=\s*[\"']?([^\"',\s]+)",
+            item,
+        )
+        if match:
+            effort = match.group(1).strip()
+            return effort or None
+    return None
 
 
 def resolved_task_model(
