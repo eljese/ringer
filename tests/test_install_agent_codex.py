@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,20 +12,27 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CODEX_DIRNAME = ".codex"
-CODEX_PLUGINS_SUBDIR = "plugins/ringer"
-CODEX_HOOKS_FILENAME = "hooks.json"
-CODEX_SKILL_REL = "skills/ringer/SKILL.md"
-CODEX_MANIFEST_REL = ".codex-plugin/plugin.json"
 
 
 def _make_codex_binary(tmp: Path) -> None:
     """Stage a fake 'codex' binary inside tmp/bin so codex_cli_present() returns True."""
     bin_dir = tmp / "bin"
-    bin_dir.mkdir()
-    bin_dir.chmod(0o755)
-    codex_path = bin_dir.joinpath("codex")
-    codex_path.write_text("#!/bin/sh\n# ringer-test-stub\necho codex\n", encoding="utf-8")
+    bin_dir.mkdir(exist_ok=True, parents=True)
+    codex_path = bin_dir / "codex"
+    # Use sys.executable directly in shebang to avoid PATH lookup issues.
+    codex_path.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, os\n"
+        "log_path = os.environ.get('FAKE_CODEX_LOG')\n"
+        "if log_path:\n"
+        "    with open(log_path, 'a') as f:\n"
+        "        f.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('FAKE_CODEX_FAIL') == '1':\n"
+        "    sys.stderr.write('Fake Codex Error\\n')\n"
+        "    sys.exit(1)\n"
+        "sys.exit(0)\n",
+        encoding="utf-8"
+    )
     codex_path.chmod(0o755)
 
 
@@ -38,17 +45,25 @@ class InstallAgentCodexTests(unittest.TestCase):
         self.fake_bin_root = Path(self.tmp.name) / "fake-bin"
         self.fake_bin_root.mkdir()
         self.home.mkdir()
-        # Add a fake codex binary so codex_cli_present() returns True for most tests.
+        self.fake_codex_log = Path(self.tmp.name) / "fake_codex.log"
         _make_codex_binary(self.fake_bin_root)
 
-    def run_cli(self, *args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+    def run_cli(self, *args: str, cwd: Path = ROOT, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["HOME"] = str(self.home)
         env["RINGER_HOME"] = str(self.ringer_home)
-        # Override PATH entirely so the only `codex` discoverable by shutil.which
-        # is the fake one in self.fake_bin_root/bin (or absent, if the test
-        # removed it). This isolates the test from the host's real codex binary.
-        env["PATH"] = str(self.fake_bin_root / "bin")
+        # Replace PATH with a minimal one so the fake bin is the only place
+        # `codex` can be discovered. We keep /usr/bin and /bin around so that
+        # the python interpreter and other utilities remain resolvable. This
+        # guards against a host with a real `codex` shim earlier on PATH
+        # silently masking our test stub.
+        minimal_path = os.pathsep.join(
+            [str(self.fake_bin_root / "bin"), "/usr/bin", "/bin"]
+        )
+        env["PATH"] = minimal_path
+        env["FAKE_CODEX_LOG"] = str(self.fake_codex_log)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [sys.executable, "ringer.py", *args],
             cwd=str(cwd),
@@ -59,150 +74,291 @@ class InstallAgentCodexTests(unittest.TestCase):
             check=False,
         )
 
-    def read_config(self) -> dict[object, object]:
-        with (self.home / CODEX_DIRNAME / "config.toml").open("rb") as fh:
+    def read_marketplace(self, project_path: Path | None = None) -> dict[str, object]:
+        base = project_path if project_path is not None else self.home
+        p = base / ".agents" / "plugins" / "marketplace.json"
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def read_config(self, project_path: Path | None = None) -> dict[object, object]:
+        base = project_path if project_path is not None else self.home
+        p = base / ".codex" / "config.toml"
+        if not p.exists():
+            return {}
+        with p.open("rb") as fh:
             return tomllib.load(fh)
 
-    def ringer_plugin_registered(self, cfg: dict[object, object]) -> bool:
-        plugins = cfg.get("plugins")
-        return isinstance(plugins, dict) and plugins.get("ringer", {}).get("enabled") is True
-
-    def test_fresh_install_copies_plugin_scaffold_under_home_codex(self) -> None:
+    def test_fresh_user_install(self) -> None:
         result = self.run_cli("install-agent", "--no-claude")
         self.assertEqual(0, result.returncode, result.stderr)
 
-        plugin_root = self.home / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR
-        self.assertTrue((plugin_root / CODEX_MANIFEST_REL).exists())
-        self.assertTrue((plugin_root / CODEX_HOOKS_FILENAME).exists())
-        self.assertTrue((plugin_root / CODEX_SKILL_REL).exists())
+        staged_dir = self.home / "plugins" / "ringer"
+        self.assertTrue((staged_dir / ".codex-plugin" / "plugin.json").exists())
+        self.assertTrue((staged_dir / "skills" / "ringer" / "SKILL.md").exists())
+        self.assertTrue((staged_dir / "hooks" / "hooks.json").exists())
+        self.assertTrue((staged_dir / "hooks" / "ringer_nudge.py").exists())
 
-    def test_fresh_install_registers_plugin_in_config_toml(self) -> None:
-        result = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        cfg = self.read_config()
-        self.assertTrue(self.ringer_plugin_registered(cfg))
-
-    def test_plugin_hooks_json_carries_absolute_ringer_nudge_path(self) -> None:
-        result = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        hooks_path = self.home / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR / CODEX_HOOKS_FILENAME
-        payload = json.loads(hooks_path.read_text(encoding="utf-8"))
-        groups = payload["hooks"]["PreToolUse"]
-        self.assertEqual("Bash", groups[0]["matcher"])
-        handlers = groups[0]["hooks"]
-        self.assertEqual("command", handlers[0]["type"])
-        self.assertIn("ringer_nudge.py", handlers[0]["command"])
-        self.assertTrue(handlers[0]["command"].endswith(" pre-bash"))
-
-    def test_skill_payload_matches_canonical_source(self) -> None:
-        result = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        installed = self.home / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR / CODEX_SKILL_REL
-        canonical = ROOT / ".claude" / "skills" / "ringer" / "SKILL.md"
-        self.assertEqual(canonical.read_bytes(), installed.read_bytes())
-
-    def test_second_install_is_idempotent(self) -> None:
-        first = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, first.returncode, first.stderr)
-        cfg_before = self.read_config()
-        skill_before = (self.home / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR / CODEX_SKILL_REL).read_bytes()
-
-        second = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, second.returncode, second.stderr)
-
-        cfg_after = self.read_config()
-        skill_after = (self.home / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR / CODEX_SKILL_REL).read_bytes()
-        self.assertEqual(cfg_before, cfg_after)
-        self.assertEqual(skill_before, skill_after)
-        # No spurious backup was created on the no-op second install.
-        config_dir = self.home / CODEX_DIRNAME
-        backups = list(config_dir.glob("config.toml.bak-*"))
-        self.assertEqual([], backups)
-
-    def test_install_preserves_unrelated_config_toml_keys(self) -> None:
-        codex_dir = self.home / CODEX_DIRNAME
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text(
-            'personality = "pragmatic"\n'
-            'model = "gpt-5.6-terra"\n'
-            '\n'
-            '[plugins."github@openai-curated"]\n'
-            'enabled = false\n',
-            encoding="utf-8",
+        # Check version has cachebuster suffix matching our new format
+        manifest = json.loads((staged_dir / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertTrue(
+            re.match(r"^1\.0\.0\+codex\.local-\d{8}-\d{6}-\d{6}$", manifest["version"]),
+            f"invalid version format: {manifest['version']}"
         )
 
+        # Check marketplace array schema and interface displayName
+        mp = self.read_marketplace()
+        self.assertEqual("personal", mp["name"])
+        self.assertEqual("Personal", mp["interface"]["displayName"])
+        plugins = mp["plugins"]
+        self.assertIsInstance(plugins, list)
+        self.assertEqual(1, len(plugins))
+        ringer_entry = plugins[0]
+        self.assertEqual("ringer", ringer_entry["name"])
+        self.assertEqual({"source": "local", "path": "./plugins/ringer"}, ringer_entry["source"])
+        self.assertEqual("AVAILABLE", ringer_entry["policy"]["installation"])
+        self.assertEqual("ON_INSTALL", ringer_entry["policy"]["authentication"])
+        self.assertEqual("Developer Tools", ringer_entry["category"])
+
+        # Check executed command
+        log_lines = self.fake_codex_log.read_text(encoding="utf-8").strip().splitlines()
+        self.assertIn("plugin add ringer@personal", log_lines)
+
+    def test_cachebuster_replacement_no_nesting(self) -> None:
+        # First install
+        result1 = self.run_cli("install-agent", "--no-claude")
+        self.assertEqual(0, result1.returncode, result1.stderr)
+        staged_dir = self.home / "plugins" / "ringer"
+        v1 = json.loads((staged_dir / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+
+        # Second install - no sleep needed since microsecond resolution guarantees difference
+        result2 = self.run_cli("install-agent", "--no-claude")
+        self.assertEqual(0, result2.returncode, result2.stderr)
+        v2 = json.loads((staged_dir / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+
+        self.assertNotEqual(v1, v2)
+        # Verify only one + exists (no nesting)
+        self.assertEqual(1, v2.count("+"))
+        self.assertTrue(re.match(r"^1\.0\.0\+codex\.local-\d{8}-\d{6}-\d{6}$", v2), f"nested: {v2}")
+
+    def test_preservation_of_unrelated_marketplace_and_config(self) -> None:
+        # Pre-seed marketplace with unrelated metadata and list plugins array
+        mp_path = self.home / ".agents" / "plugins" / "marketplace.json"
+        mp_path.parent.mkdir(parents=True, exist_ok=True)
+        mp_path.write_text(json.dumps({
+            "name": "personal",
+            "unrelated_key": "unrelated_val",
+            "plugins": [
+                {"name": "other_plugin", "category": "Testing"}
+            ]
+        }), encoding="utf-8")
+
+        # Pre-seed config.toml
+        cfg_path = self.home / ".codex" / "config.toml"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text("personality = 'friendly'\n", encoding="utf-8")
+
         result = self.run_cli("install-agent", "--no-claude")
         self.assertEqual(0, result.returncode, result.stderr)
 
+        # Verify marketplace kept other fields and preserved order
+        mp = self.read_marketplace()
+        self.assertEqual("unrelated_val", mp["unrelated_key"])
+        plugins = mp["plugins"]
+        self.assertIsInstance(plugins, list)
+        self.assertEqual(2, len(plugins))
+        self.assertEqual("other_plugin", plugins[0]["name"])
+        self.assertEqual("ringer", plugins[1]["name"])
+
+        # Verify config.toml kept personality
         cfg = self.read_config()
-        self.assertEqual("pragmatic", cfg["personality"])
-        self.assertEqual("gpt-5.6-terra", cfg["model"])
-        self.assertFalse(cfg["plugins"]["github@openai-curated"]["enabled"])
-        self.assertTrue(cfg["plugins"]["ringer"]["enabled"])
+        self.assertEqual("friendly", cfg["personality"])
 
-    def test_uninstall_removes_plugin_dir_and_config_entry(self) -> None:
-        install = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, install.returncode, install.stderr)
+    def test_replacement_preserves_order(self) -> None:
+        mp_path = self.home / ".agents" / "plugins" / "marketplace.json"
+        mp_path.parent.mkdir(parents=True, exist_ok=True)
+        mp_path.write_text(json.dumps({
+            "name": "custom-name",
+            "plugins": [
+                {"name": "plugin-a", "category": "A"},
+                {"name": "ringer", "source": {"source": "local", "path": "old-path"}},
+                {"name": "plugin-b", "category": "B"}
+            ]
+        }), encoding="utf-8")
 
-        # Add an unrelated entry to config.toml so we can verify uninstall
-        # only touches [plugins.ringer].
+        result = self.run_cli("install-agent", "--no-claude")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        mp = self.read_marketplace()
+        self.assertEqual("custom-name", mp["name"])
+        plugins = mp["plugins"]
+        self.assertEqual(3, len(plugins))
+        self.assertEqual("plugin-a", plugins[0]["name"])
+        self.assertEqual("ringer", plugins[1]["name"])
+        self.assertEqual("./plugins/ringer", plugins[1]["source"]["path"])
+        self.assertEqual("plugin-b", plugins[2]["name"])
+
+    def test_malformed_marketplace_does_not_overwrite(self) -> None:
+        mp_path = self.home / ".agents" / "plugins" / "marketplace.json"
+        mp_path.parent.mkdir(parents=True, exist_ok=True)
+        bad_json = "{"  # invalid JSON
+        mp_path.write_text(bad_json, encoding="utf-8")
+
+        result = self.run_cli("install-agent", "--no-claude")
+        self.assertNotEqual(0, result.returncode)
+
+        # Verify the file was not overwritten
+        self.assertEqual(bad_json, mp_path.read_text(encoding="utf-8"))
+
+    def test_invalid_marketplace_shape_does_not_overwrite(self) -> None:
+        mp_path = self.home / ".agents" / "plugins" / "marketplace.json"
+        mp_path.parent.mkdir(parents=True, exist_ok=True)
+        bad_json = '{"plugins": "not-an-array"}'
+        mp_path.write_text(bad_json, encoding="utf-8")
+
+        result = self.run_cli("install-agent", "--no-claude")
+        self.assertNotEqual(0, result.returncode)
+
+        # Verify the file was not overwritten
+        self.assertEqual(bad_json, mp_path.read_text(encoding="utf-8"))
+
+    def test_staged_payload_matches(self) -> None:
+        result = self.run_cli("install-agent", "--no-claude")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        staged_dir = self.home / "plugins" / "ringer"
+        source_dir = ROOT / "plugins" / "ringer"
+
+        staged_hooks = staged_dir / "hooks" / "hooks.json"
+        source_hooks = source_dir / "hooks" / "hooks.json"
+        self.assertEqual(source_hooks.read_bytes(), staged_hooks.read_bytes())
+
+        # Hook command must use the ${PLUGIN_ROOT} literal that Codex
+        # expands at runtime; a regression to __RINGER_NUDGE_PATH__ would
+        # ship a plugin whose hook command Codex never resolves.
+        staged_hooks_text = staged_hooks.read_text(encoding="utf-8")
+        self.assertIn("${PLUGIN_ROOT}", staged_hooks_text)
+        self.assertNotIn("__RINGER_NUDGE_PATH__", staged_hooks_text)
+        hooks_payload = json.loads(staged_hooks_text)
+        pretooluse = hooks_payload["hooks"]["PreToolUse"]
+        self.assertEqual("Bash", pretooluse[0]["matcher"])
+        self.assertEqual("pre-bash", pretooluse[0]["hooks"][0]["command"].rsplit(" ", 1)[-1])
+
+        self.assertEqual(
+            (ROOT / ".claude" / "skills" / "ringer" / "SKILL.md").read_bytes(),
+            (staged_dir / "skills" / "ringer" / "SKILL.md").read_bytes(),
+        )
+        self.assertEqual(
+            (ROOT / "hooks" / "ringer_nudge.py").read_bytes(),
+            (staged_dir / "hooks" / "ringer_nudge.py").read_bytes(),
+        )
+
+    def test_exact_add_remove_commands(self) -> None:
+        self.run_cli("install-agent", "--no-claude")
+        self.run_cli("uninstall-agent", "--no-claude")
+
+        log_lines = self.fake_codex_log.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(["plugin add ringer@personal", "plugin remove ringer@personal"], log_lines)
+
+    def test_add_failure_behavior(self) -> None:
+        result = self.run_cli("install-agent", "--no-claude", extra_env={"FAKE_CODEX_FAIL": "1"})
+        self.assertNotEqual(0, result.returncode)
+
+    def test_remove_failure_behavior_preserves_artifacts(self) -> None:
+        # Install successfully first
+        self.run_cli("install-agent", "--no-claude")
+
+        staged_dir = self.home / "plugins" / "ringer"
+        self.assertTrue(staged_dir.exists())
+        mp = self.read_marketplace()
+        self.assertTrue(any(p.get("name") == "ringer" for p in mp.get("plugins", [])))
+
+        # Force uninstall to fail
+        result = self.run_cli("uninstall-agent", "--no-claude", extra_env={"FAKE_CODEX_FAIL": "1"})
+        self.assertNotEqual(0, result.returncode)
+
+        # Artifacts must be preserved
+        self.assertTrue(staged_dir.exists())
+        mp_after = self.read_marketplace()
+        self.assertTrue(any(p.get("name") == "ringer" for p in mp_after.get("plugins", [])))
+
+    def test_legacy_cleanup(self) -> None:
+        legacy_dir = self.home / ".codex" / "plugins" / "ringer"
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_dir / "hooks.json").write_text("{}", encoding="utf-8")
+
+        cfg_path = self.home / ".codex" / "config.toml"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text("[plugins.ringer]\nenabled = true\n", encoding="utf-8")
+
+        self.run_cli("install-agent", "--no-claude")
+
+        self.assertFalse(legacy_dir.exists())
         cfg = self.read_config()
-        cfg["plugins"]["github@openai-curated"] = {"enabled": False}
-        with (self.home / CODEX_DIRNAME / "config.toml").open("w", encoding="utf-8") as fh:
-            from ringer import write_toml_settings  # type: ignore[import-not-found]
-            write_toml_settings(self.home / CODEX_DIRNAME / "config.toml", cfg)
+        self.assertNotIn("plugins", cfg)
 
-        uninstall = self.run_cli("uninstall-agent", "--no-claude")
-        self.assertEqual(0, uninstall.returncode, uninstall.stderr)
-
-        self.assertFalse((self.home / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR).exists())
-        cfg_after = self.read_config()
-        self.assertNotIn("ringer", cfg_after["plugins"])
-        self.assertFalse(cfg_after["plugins"]["github@openai-curated"]["enabled"])
-
-    def test_no_codex_flag_skips_codex_path(self) -> None:
-        result = self.run_cli("install-agent", "--no-codex")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        self.assertFalse((self.home / CODEX_DIRNAME).exists())
-
-    def test_no_claude_flag_skips_claude_path(self) -> None:
-        result = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        self.assertFalse((self.home / ".claude").exists())
-        self.assertTrue((self.home / CODEX_DIRNAME / "config.toml").exists())
-
-    def test_codex_skipped_when_cli_not_on_path(self) -> None:
-        # Override the bin dir with one that does NOT contain a codex binary.
-        shutil.rmtree(self.fake_bin_root)
-        self.fake_bin_root.mkdir()
-
-        result = self.run_cli("install-agent", "--no-claude")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        self.assertFalse((self.home / CODEX_DIRNAME).exists())
-        self.assertIn("Codex CLI not found on PATH", result.stdout)
-
-    def test_project_variant_writes_under_temp_cwd(self) -> None:
+    @unittest.skipIf(sys.platform == "win32", "requires symlink privileges")
+    def test_project_scope(self) -> None:
         project = Path(self.tmp.name) / "project"
         project.mkdir()
+        # Create a mock/fake project directory that is NOT the real checkouts path
         os.symlink(ROOT / "ringer.py", project / "ringer.py")
 
-        install = self.run_cli("install-agent", "--no-claude", "--project", cwd=project)
-        self.assertEqual(0, install.returncode, install.stderr)
+        result = self.run_cli("install-agent", "--no-claude", "--project", cwd=project)
+        self.assertEqual(0, result.returncode, result.stderr)
 
-        self.assertTrue((project / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR / CODEX_HOOKS_FILENAME).exists())
-        self.assertTrue((project / CODEX_DIRNAME / "config.toml").exists())
-        self.assertFalse((self.home / CODEX_DIRNAME).exists())
+        # Stage path must go into <cwd>/.agents/plugins/ringer
+        staged_dir = project / ".agents" / "plugins" / "ringer"
+        self.assertTrue((staged_dir / ".codex-plugin" / "plugin.json").exists())
 
-        uninstall = self.run_cli("uninstall-agent", "--no-claude", "--project", cwd=project)
-        self.assertEqual(0, uninstall.returncode, uninstall.stderr)
+        # Check project marketplace and displayName
+        mp = self.read_marketplace(project)
+        self.assertEqual("ringer-project", mp["name"])
+        self.assertEqual("Ringer Project", mp["interface"]["displayName"])
+        plugins = mp["plugins"]
+        self.assertIsInstance(plugins, list)
+        self.assertEqual(1, len(plugins))
+        self.assertEqual("./.agents/plugins/ringer", plugins[0]["source"]["path"])
 
-        self.assertFalse((project / CODEX_DIRNAME / CODEX_PLUGINS_SUBDIR).exists())
+        # Uninstall project
+        un_result = self.run_cli("uninstall-agent", "--no-claude", "--project", cwd=project)
+        self.assertEqual(0, un_result.returncode, un_result.stderr)
+        self.assertFalse(staged_dir.exists())
+        self.assertFalse((project / ".agents" / "plugins" / "marketplace.json").exists())
+        self.assertEqual(
+            ["plugin add ringer@ringer-project", "plugin remove ringer@ringer-project"],
+            self.fake_codex_log.read_text(encoding="utf-8").strip().splitlines(),
+        )
+
+    def test_no_codex_flag(self) -> None:
+        self.run_cli("install-agent", "--no-codex")
+        self.assertFalse((self.home / ".agents").exists())
+
+    def test_no_claude_flag(self) -> None:
+        self.run_cli("install-agent", "--no-claude")
+        self.assertFalse((self.home / ".claude").exists())
+        self.assertTrue((self.home / ".agents").exists())
+
+    def test_codex_missing_behavior(self) -> None:
+        result = self.run_cli("install-agent", "--no-claude", extra_env={"PATH": ""})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Codex CLI not found on PATH", result.stdout)
+        self.assertFalse((self.home / ".agents").exists())
+
+    def test_uninstall_works_without_codex_cli(self) -> None:
+        # Install with a working stub codex so we have state to clean up.
+        self.run_cli("install-agent", "--no-claude")
+        staged_dir = self.home / "plugins" / "ringer"
+        mp_path = self.home / ".agents" / "plugins" / "marketplace.json"
+        self.assertTrue(staged_dir.exists())
+        self.assertTrue(mp_path.exists())
+
+        # Drop the fake codex binary from PATH so the uninstall's CLI step
+        # is skipped. Filesystem cleanup must still run.
+        result = self.run_cli("uninstall-agent", "--no-claude", extra_env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(staged_dir.exists())
+        self.assertFalse(mp_path.exists())
 
 
 class TomlEmitterTests(unittest.TestCase):
@@ -211,7 +367,6 @@ class TomlEmitterTests(unittest.TestCase):
     def setUp(self) -> None:
         sys.path.insert(0, str(ROOT))
         from ringer import write_toml_settings  # type: ignore[import-not-found]
-
         self.write = write_toml_settings
 
     def _roundtrip(self, payload: dict[object, object]) -> dict[object, object]:
@@ -265,96 +420,6 @@ class TomlEmitterTests(unittest.TestCase):
     def test_quoted_key_with_dot_round_trips(self) -> None:
         payload = {"plugins": {"github@openai-curated": {"enabled": True}}}
         self.assertEqual(payload, self._roundtrip(payload))
-
-
-class HookCommandSubstitutionTests(unittest.TestCase):
-    """Unit test for the placeholder substitution used by _install_agent_codex."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT))
-
-    def test_substitute_placeholder(self) -> None:
-        from ringer import _rewrite_plugin_hook_command  # type: ignore[import-not-found]
-
-        with tempfile.TemporaryDirectory() as t:
-            hooks_path = Path(t) / "hooks.json"
-            hooks_path.write_text(
-                json.dumps(
-                    {
-                        "hooks": {
-                            "PreToolUse": [
-                                {
-                                    "matcher": "Bash",
-                                    "hooks": [
-                                        {
-                                            "type": "command",
-                                            "command": "python3 __RINGER_NUDGE_PATH__ pre-bash",
-                                        }
-                                    ],
-                                }
-                            ]
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            _rewrite_plugin_hook_command(hooks_path, "python3 /tmp/custom/ringer_nudge.py pre-bash")
-            payload = json.loads(hooks_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                "python3 /tmp/custom/ringer_nudge.py pre-bash",
-                payload["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            )
-
-
-class CodexPluginRegistrationTests(unittest.TestCase):
-    """Unit tests for _register_ringer_plugin / _remove_ringer_plugin."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT))
-
-    def test_register_when_missing(self) -> None:
-        from ringer import _register_ringer_plugin  # type: ignore[import-not-found]
-
-        settings: dict[object, object] = {}
-        self.assertTrue(_register_ringer_plugin(settings))
-        self.assertEqual({"plugins": {"ringer": {"enabled": True}}}, settings)
-
-    def test_register_when_disabled(self) -> None:
-        from ringer import _register_ringer_plugin  # type: ignore[import-not-found]
-
-        settings = {"plugins": {"ringer": {"enabled": False}}}
-        self.assertTrue(_register_ringer_plugin(settings))
-        self.assertEqual({"ringer": {"enabled": True}}, settings["plugins"])
-
-    def test_register_when_already_enabled_is_noop(self) -> None:
-        from ringer import _register_ringer_plugin  # type: ignore[import-not-found]
-
-        settings = {"plugins": {"ringer": {"enabled": True}, "other": {"enabled": True}}}
-        self.assertFalse(_register_ringer_plugin(settings))
-        self.assertEqual(
-            {"ringer": {"enabled": True}, "other": {"enabled": True}},
-            settings["plugins"],
-        )
-
-    def test_remove_when_present(self) -> None:
-        from ringer import _remove_ringer_plugin  # type: ignore[import-not-found]
-
-        settings = {"plugins": {"ringer": {"enabled": True}, "other": {"enabled": True}}}
-        self.assertTrue(_remove_ringer_plugin(settings))
-        self.assertEqual({"other": {"enabled": True}}, settings["plugins"])
-
-    def test_remove_when_only_entry_clears_plugins_key(self) -> None:
-        from ringer import _remove_ringer_plugin  # type: ignore[import-not-found]
-
-        settings = {"plugins": {"ringer": {"enabled": True}}}
-        self.assertTrue(_remove_ringer_plugin(settings))
-        self.assertNotIn("plugins", settings)
-
-    def test_remove_when_absent_is_noop(self) -> None:
-        from ringer import _remove_ringer_plugin  # type: ignore[import-not-found]
-
-        settings = {"plugins": {"other": {"enabled": True}}}
-        self.assertFalse(_remove_ringer_plugin(settings))
 
 
 if __name__ == "__main__":

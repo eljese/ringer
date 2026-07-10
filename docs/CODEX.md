@@ -6,107 +6,80 @@ run `./ringer.py install-agent`. The Claude Code side is documented in
 
 ## What install-agent does for Codex
 
-`install-agent` installs a minimal `ringer` Codex plugin under the user
-(or project) config root:
+`install-agent` configures Ringer as a Codex plugin using the Codex 0.144.0+ marketplace and cache architecture.
 
-| Path under ringer repo | Installed to (user scope) | Installed to (project scope, with `--project`) |
-|---|---|---|
-| `plugins/ringer/.codex-plugin/plugin.json` | `~/.codex/plugins/ringer/.codex-plugin/plugin.json` | `./.codex/plugins/ringer/.codex-plugin/plugin.json` |
-| `plugins/ringer/hooks.json` | `~/.codex/plugins/ringer/hooks.json` | `./.codex/plugins/ringer/hooks.json` |
-| `plugins/ringer/skills/ringer/SKILL.md` | `~/.codex/plugins/ringer/skills/ringer/SKILL.md` | `./.codex/plugins/ringer/skills/ringer/SKILL.md` |
+### 1. Staging the Plugin
+The installer stages a complete copy of the Ringer plugin from the repository's `plugins/ringer` bundle:
 
-The install also writes `[plugins.ringer] enabled = true` into the
-matching `config.toml` (preserving all other keys).
+| Scope | Staged Location |
+|---|---|
+| User Scope | `~/plugins/ringer/` |
+| Project Scope | `./.agents/plugins/ringer/` |
 
-The skill payload is the same `SKILL.md` that Claude Code uses; Ringer
-copies it from `.claude/skills/ringer/SKILL.md` at install time so the
-repo has a single source of truth.
+During staging:
+- The `SKILL.md` is refreshed from the canonical repository source (`.claude/skills/ringer/SKILL.md`).
+- The nudge handler script `ringer_nudge.py` is refreshed from `hooks/ringer_nudge.py`.
+- The plugin includes the default `hooks/hooks.json` configuration file, which configures hooks to run via `${PLUGIN_ROOT}`.
+- A fresh strict-semver cachebuster (for example, `1.0.0+codex.local-20260710-063500-123456`) is assigned to the staged `.codex-plugin/plugin.json` so Codex refreshes its installation cache. The committed source manifest remains at its base version. Verified empirically on 2026-07-10 against Codex 0.144.0: after a re-install, the cache directory `~/.codex/plugins/cache/personal/ringer/<new-version>/` was created with the new cachebuster, and the old version was retained for rollback. To verify on your machine, see the "Verify Codex Cache" step under [Manual verification](#manual-verification).
 
-## Why a plugin (not a direct skill copy)
+The installer detects when the user is running from inside the ringer repository with `$HOME` pointing at the repo and skips the in-place staging mutation. The marketplace entry is still registered, and Codex will load the plugin directly from the repository path on each `codex` invocation.
 
-Codex has no top-level user skills directory. Skills only ship inside
-plugins, registered in `config.toml` under `[plugins.<name>]`. So the
-smallest faithful unit of "install the ringer skill for Codex" is a
-plugin that bundles the skill plus its hook definitions together.
+### 2. Marketplace Registration
+The installer registers the staged plugin in a local marketplace file:
 
-## Why only PreToolUse (not PostToolUse)
+| Scope | Marketplace JSON Path |
+|---|---|
+| User Scope | `~/.agents/plugins/marketplace.json` |
+| Project Scope | `./.agents/plugins/marketplace.json` |
 
-Codex hook events are narrow on purpose: `PreToolUse` and `PostToolUse`
-hooks only fire on `Bash` tool calls. They never receive `Edit` or
-`Write` events. The existing `ringer_nudge.py` script has two actions:
+New user marketplaces are named `personal`; new project marketplaces are named `ringer-project`. If the marketplace already has a non-empty name, the installer preserves and uses it.
 
-- `pre-bash` — nudges when a Bash command looks like a model call or a
-  harness script (matches `api.openai.com`, `api.anthropic.com`,
-  `simulate*.py`, `harness*.mjs`, etc.)
-- `post-edit` — nudges when an edit loop accumulates ≥ 8 edits across
-  ≥ 3 files without a live Ringer run
+The ordered `plugins` array contains a Ringer entry with:
+- `name`: `ringer`
+- `source`: `{"source": "local", "path": "./plugins/ringer"}` for user scope, or the project path `./.agents/plugins/ringer`
+- `policy.installation`: `AVAILABLE`
+- `policy.authentication`: `ON_INSTALL`
+- `category`: `Developer Tools`
 
-`post-edit` is designed for `Edit`/`Write` events. Under Codex it would
-receive only Bash events and never fire, so Ringer installs only
-`PreToolUse Bash -> pre-bash` for Codex. The edit-loop nudge is
-Claude-only.
+Other pre-existing entries and metadata in the marketplace file are preserved.
 
-## Hook command substitution
+### 3. Installation execution
+The installer runs `codex plugin add ringer@<marketplace-name>` to import, cache, and register the plugin. For a new user marketplace, that selector is `ringer@personal`; for a new project marketplace, it is `ringer@ringer-project`.
 
-The committed `plugins/ringer/hooks.json` contains a
-`__RINGER_NUDGE_PATH__` placeholder. At install time, Ringer rewrites it
-with the absolute path to its own `hooks/ringer_nudge.py`, so the plugin
-works regardless of where the user cloned the repo:
+### 4. Legacy Cleanup
+Any legacy files from the old installer (`~/.codex/plugins/ringer` or project equivalent, and `[plugins.ringer]` in `.codex/config.toml`) are cleanly removed to prevent conflicts.
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /home/<user>/ringer/hooks/ringer_nudge.py pre-bash"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+**Note:** Plugin enablement remains host-global in Codex. Even when the source marketplace and staged plugin directory are project-local (`--project`), the `~/.codex/plugins/cache/` copy is host-wide.
 
-Re-running `install-agent` recreates the plugin tree and re-runs the
-substitution, so moving the ringer repo between installs updates the
-absolute path automatically.
+## Hook trust requirement
+
+To prevent unauthorized shell command execution, Codex does not run hooks automatically after installation. You must explicitly review and trust the plugin hooks.
+
+See the "Verify Hooks Trust" step in the [Manual verification](#manual-verification) section below for the exact command.
+
 
 ## Manual verification
 
 After `./ringer.py install-agent`:
 
-```bash
-# Plugin files
-ls ~/.codex/plugins/ringer
-# .codex-plugin  hooks.json  skills
+1. **Verify Staged Files**:
+   ```bash
+   ls ~/plugins/ringer
+   # .codex-plugin  hooks  skills
+   ```
 
-# Hook command points at the ringer repo
-cat ~/.codex/plugins/ringer/hooks.json
+2. **Verify Marketplace Entry**:
+   ```bash
+   cat ~/.agents/plugins/marketplace.json
+   ```
+   Should contain the Ringer entry with `"source": {"source": "local", "path": "./plugins/ringer"}`.
 
-# Plugin is registered
-python3 -c "import tomllib; \
-  print(tomllib.load(open('$HOME/.codex/config.toml','rb'))['plugins']['ringer'])"
-# {'enabled': True}
+3. **Verify Codex Cache**:
+   Codex installs the cached plugin under `~/.codex/plugins/cache/`. Verify that the cached plugin exists and contains the fresh cachebustered version in its `plugin.json`.
 
-# Skill byte-matches the canonical source
-diff ~/.codex/plugins/ringer/skills/ringer/SKILL.md \
-     <repo>/.claude/skills/ringer/SKILL.md
-```
+4. **Verify Hooks Trust**:
+   To trust the hooks, start a new Codex session, open `/hooks`, review the exact hook, and trust it there.
 
-Live nudge probe — start a Codex session and run something that should
-trigger the pre-bash nudge:
-
-```
-echo api.openai.com
-```
-
-The session receives a single nudge pointing at the ringer skill. The
-nudge is deduplicated per session (one nudge per session per event) and
-silent inside a live Ringer run.
 
 ## Uninstall
 
@@ -115,45 +88,8 @@ silent inside a live Ringer run.
 ./ringer.py uninstall-agent --no-claude   # codex only
 ```
 
-Removes `~/.codex/plugins/ringer/` and strips `[plugins.ringer]` from
-`config.toml` (leaving any other `[plugins."..."]` entries alone). The
-matching `config.toml.bak-<UTC-stamp>` is preserved on disk for recovery.
-
-## Known limitations
-
-- **Hand-rolled TOML emitter.** Ringer rewrites `config.toml` with a
-  small in-tree emitter (`write_toml_settings` in `ringer.py`) rather
-  than taking on a `tomli_w` dependency. The subset covers the shapes
-  observed in real Codex configs: strings, bools, ints, floats,
-  nested tables, arrays of tables, and quoted keys with embedded `@`,
-  `.`, or `/`. Inline tables (`a = {x = 1}`) and heredocs are not
-  supported; if your config uses them, file an issue and the emitter
-  will be extended or the project will adopt `tomli_w`.
-- **Codex hook delivery is Bash-only.** This is a Codex design
-  constraint, not a Ringer limitation. The edit-loop nudge is
-  Claude-only by design.
-- **Plugins are not project-isolated by Codex.** Codex applies
-  `[plugins."<name>"] enabled = true` from the user's `config.toml`
-  globally. The `--project` install scope for Codex is provided for
-  parity with the Claude install path but is uncommon in practice.
-
-## Source layout
-
-```
-ringer/
-├── plugins/
-│   └── ringer/
-│       ├── .codex-plugin/
-│       │   └── plugin.json
-│       ├── hooks.json
-│       └── skills/
-│           └── ringer/
-│               └── SKILL.md    # copied from .claude/skills/ringer/SKILL.md at install time
-├── .claude/
-│   └── skills/
-│       └── ringer/
-│           └── SKILL.md        # canonical skill source
-├── hooks/
-│   └── ringer_nudge.py         # shared hook script (pre-bash, post-edit)
-└── ringer.py                   # install_agent / uninstall_agent + TOML emitter
-```
+Uninstall performs the following:
+1. Runs `codex plugin remove ringer@<marketplace-name>` using the same preserved selector as installation.
+2. Removes only the staged `~/plugins/ringer` directory (or the project staged path).
+3. Strips the `ringer` entry from the marketplace JSON, preserving all other entries.
+4. Cleans any legacy Ringer state if present.

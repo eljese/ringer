@@ -8203,6 +8203,120 @@ def _uninstall_agent_claude(project: bool) -> int:
     return 0
 
 
+def _assign_cachebuster(plugin_json_path: Path) -> None:
+    if not plugin_json_path.exists():
+        return
+    try:
+        manifest = json.loads(plugin_json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"failed to parse staged manifest: {plugin_json_path}") from exc
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(f"staged manifest has no valid version: {plugin_json_path}")
+    base_version = version.split("+", 1)[0]
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    new_version = f"{base_version}+codex.local-{timestamp}"
+    manifest["version"] = new_version
+    temp_path = plugin_json_path.with_name(f".{plugin_json_path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp_path, plugin_json_path)
+
+
+def update_marketplace(marketplace_path: Path, name: str, source_path_str: str) -> str:
+    marketplace_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    marketplace_name = name
+    if marketplace_path.exists():
+        content = marketplace_path.read_text(encoding="utf-8").strip()
+        if content:
+            try:
+                data = json.loads(content)
+            except Exception as exc:
+                raise ValueError(f"Invalid JSON in marketplace: {exc}") from exc
+            if not isinstance(data, dict):
+                raise ValueError("Marketplace root must be a JSON object")
+            existing_name = data.get("name")
+            if isinstance(existing_name, str) and existing_name.strip() != "":
+                marketplace_name = existing_name
+            if "interface" in data and not isinstance(data["interface"], dict):
+                raise ValueError("Marketplace 'interface' must be a JSON object")
+            if "plugins" in data and not isinstance(data["plugins"], list):
+                raise ValueError("Marketplace 'plugins' must be a JSON array")
+
+    data["name"] = marketplace_name
+    interface = data.setdefault("interface", {})
+    if not isinstance(interface, dict):
+        interface = {}
+        data["interface"] = interface
+    display_name = " ".join(part.capitalize() for part in marketplace_name.split("-"))
+    interface.setdefault("displayName", display_name)
+
+    plugins = data.setdefault("plugins", [])
+    if not isinstance(plugins, list):
+        plugins = []
+        data["plugins"] = plugins
+
+    ringer_entry = {
+        "name": "ringer",
+        "source": {
+            "source": "local",
+            "path": source_path_str
+        },
+        "policy": {
+            "installation": "AVAILABLE",
+            "authentication": "ON_INSTALL"
+        },
+        "category": "Developer Tools"
+    }
+
+    replaced = False
+    for i, item in enumerate(plugins):
+        if not isinstance(item, dict):
+            raise ValueError("Invalid plugin entry shape in marketplace array")
+        if item.get("name") == "ringer":
+            plugins[i] = ringer_entry
+            replaced = True
+            break
+    if not replaced:
+        plugins.append(ringer_entry)
+
+    # Sibling temp plus replace write
+    temp_path = marketplace_path.with_name(f".{marketplace_path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(marketplace_path)
+    except Exception as e:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+        raise e
+
+    return marketplace_name
+
+
+def cleanup_legacy_codex(project: bool) -> None:
+    legacy_dir = (Path.cwd() if project else Path.home()) / ".codex" / "plugins" / "ringer"
+    if legacy_dir.exists():
+        try:
+            shutil.rmtree(legacy_dir)
+        except Exception as exc:
+            print(f"warning: failed to remove legacy plugin dir {legacy_dir}: {exc}", file=sys.stderr)
+    config_path = (Path.cwd() if project else Path.home()) / ".codex" / "config.toml"
+    if config_path.exists():
+        try:
+            settings = load_toml_settings(config_path)
+            if _remove_ringer_plugin(settings):
+                write_toml_settings(config_path, settings)
+        except Exception as exc:
+            print(
+                f"warning: failed to strip [plugins.ringer] from {config_path}: {exc}",
+                file=sys.stderr,
+            )
+            pass
+
+
 def _install_agent_codex(project: bool) -> int:
     """Install the ringer Codex plugin at user or project scope.
 
@@ -8217,76 +8331,261 @@ def _install_agent_codex(project: bool) -> int:
         )
         return 0
 
-    source = codex_plugin_source()
-    target = codex_plugin_target(project)
-    if not source.exists():
-        raise ValueError(f"ringer codex plugin source not found: {source}")
+    source_dir = codex_plugin_source()
+    if not source_dir.exists():
+        raise ValueError(f"ringer codex plugin source not found: {source_dir}")
 
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(source, target)
+    if project:
+        marketplace_path = Path.cwd() / ".agents" / "plugins" / "marketplace.json"
+        staged_path = Path.cwd() / ".agents" / "plugins" / "ringer"
+        source_path_str = "./.agents/plugins/ringer"
+    else:
+        marketplace_path = Path.home() / ".agents" / "plugins" / "marketplace.json"
+        staged_path = Path.home() / "plugins" / "ringer"
+        source_path_str = "./plugins/ringer"
 
-    real_command = ringer_hook_command("pre-bash")
-    _rewrite_plugin_hook_command(target / "hooks.json", real_command)
+    # Bail out cleanly if the user is running from inside the ringer repo with
+    # $HOME = repo_root. Mutating plugins/ringer/ in place would be hostile to
+    # the developer's working tree. We still want the marketplace + codex
+    # `plugin add` to register the plugin in cache (Codex reads it from the
+    # repo path on each invocation), so we just skip the staged copy.
+    is_self = staged_path.resolve() == source_dir.resolve()
 
-    skill_source = ringer_skill_source()
-    skill_target = target / "skills" / "ringer" / "SKILL.md"
-    if not skill_source.exists():
-        raise ValueError(f"ringer skill source not found: {skill_source}")
-    skill_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(skill_source, skill_target)
+    # Stage the complete Ringer plugin from the repo bundle
+    if not is_self:
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        if staged_path.exists():
+            shutil.rmtree(staged_path)
+        # Preserve symlinks; defense-in-depth against a malicious scaffold
+        # symlink. Ignore .git to keep the cache slim.
+        shutil.copytree(
+            source_dir,
+            staged_path,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".git"),
+        )
 
-    config_path = codex_config_path(project)
-    settings = load_toml_settings(config_path)
-    registered = _register_ringer_plugin(settings)
-    if registered or not config_path.exists():
-        write_toml_settings(config_path, settings)
+    # Refresh staged SKILL.md and bundled ringer_nudge.py from canonical sources.
+    # Skipped when staged == source (running from inside the repo).
+    if not is_self:
+        skill_source = ringer_skill_source()
+        nudge_source = repo_root() / "hooks" / "ringer_nudge.py"
+
+        if not skill_source.exists():
+            raise ValueError(f"ringer skill source not found: {skill_source}")
+        if not nudge_source.exists():
+            raise ValueError(f"ringer nudge script source not found: {nudge_source}")
+
+        skill_target = staged_path / "skills" / "ringer" / "SKILL.md"
+        skill_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(skill_source, skill_target)
+
+        nudge_target = staged_path / "hooks" / "ringer_nudge.py"
+        nudge_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(nudge_source, nudge_target)
+        try:
+            nudge_target.chmod(0o755)
+        except Exception:
+            pass
+
+    # Assign fresh strict-semver cachebuster to the staged manifest. Skipped
+    # when staged == source.
+    if not is_self:
+        plugin_json_path = staged_path / ".codex-plugin" / "plugin.json"
+        _assign_cachebuster(plugin_json_path)
+
+    # Create or update marketplace.json
+    try:
+        default_name = "ringer-project" if project else "personal"
+        marketplace_name = update_marketplace(marketplace_path, default_name, source_path_str)
+    except Exception as exc:
+        print(f"Failed to update marketplace: {exc}", file=sys.stderr)
+        return 1
+
+    # Clean legacy Ringer state
+    cleanup_legacy_codex(project)
+
+    # Execute codex plugin add ringer@<marketplace_name>
+    try:
+        res = subprocess.run(["codex", "plugin", "add", f"ringer@{marketplace_name}"], capture_output=True, text=True)
+        if res.returncode != 0:
+            print(res.stdout)
+            print(res.stderr, file=sys.stderr)
+            return res.returncode
+    except Exception as exc:
+        print(f"Failed to execute codex plugin add: {exc}", file=sys.stderr)
+        return 1
 
     scope = "project" if project else "user"
     print(f"Installed ringer codex plugin for {scope} scope.")
-    print(f"Plugin: {target}")
-    if registered:
-        print(f"Registered [plugins.ringer] in {config_path}")
-    else:
-        print(f"[plugins.ringer] already registered in {config_path}")
+    print(f"Staged source: {staged_path}")
+    print(f"Marketplace entry registered in {marketplace_path}")
+    print("NOTE: Codex plugin hooks require explicit user trust. After installation, please start a new Codex session, open /hooks, review the exact hook, and trust it there.")
+    if project:
+        print("Note: Plugin enablement remains host-global even when its source marketplace is project-local.")
     return 0
 
 
 def _uninstall_agent_codex(project: bool) -> int:
-    target = codex_plugin_target(project)
-    removed_plugin = False
-    if target.exists():
-        shutil.rmtree(target)
-        removed_plugin = True
+    if project:
+        marketplace_path = Path.cwd() / ".agents" / "plugins" / "marketplace.json"
+        staged_path = Path.cwd() / ".agents" / "plugins" / "ringer"
+    else:
+        marketplace_path = Path.home() / ".agents" / "plugins" / "marketplace.json"
+        staged_path = Path.home() / "plugins" / "ringer"
 
-    config_path = codex_config_path(project)
+    # Preserve an existing nonempty marketplace name or default
+    marketplace_name = "ringer-project" if project else "personal"
+    if marketplace_path.exists():
+        try:
+            content = marketplace_path.read_text(encoding="utf-8").strip()
+            if content:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    existing_name = data.get("name")
+                    if isinstance(existing_name, str) and existing_name.strip() != "":
+                        marketplace_name = existing_name
+        except Exception:
+            pass
+
+    # Execute codex plugin remove ringer@<marketplace_name>.
+    #
+    # If the CLI is present and SUCCEEDS, we proceed with filesystem cleanup
+    # so the local marketplace.json and staged dir are brought in sync.
+    #
+    # If the CLI is present and FAILS, we bail out without touching local
+    # state — the user can retry, and removing the marketplace entry while
+    # the cached plugin still exists would leave the plugin orphaned in
+    # ~/.codex/plugins/cache/.
+    #
+    # If the CLI is ABSENT, we proceed with filesystem cleanup so a user who
+    # removes the codex CLI between install and uninstall does not leave stale
+    # state on disk. (The plugin will be orphaned in the codex cache if codex
+    # is later reinstalled, but that is the lesser of two evils.)
+    cli_rc = 0
+    cli_attempted = False
+    if codex_cli_present():
+        cli_attempted = True
+        try:
+            res = subprocess.run(
+                ["codex", "plugin", "remove", f"ringer@{marketplace_name}"],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0:
+                cli_rc = res.returncode
+                print(f"Codex CLI remove output: {res.stdout.strip()}")
+                if res.stderr:
+                    print(f"Codex CLI remove error: {res.stderr.strip()}", file=sys.stderr)
+                print(
+                    "Local artifacts preserved so the remove can be retried. "
+                    "Re-run `ringer uninstall-agent` once the codex CLI is healthy."
+                )
+                return cli_rc
+        except Exception as exc:
+            print(f"Failed to execute codex plugin remove: {exc}", file=sys.stderr)
+            print("Local artifacts preserved so the remove can be retried.")
+            return 1
+    else:
+        print(
+            "Codex CLI not found on PATH; skipping `codex plugin remove` "
+            "but continuing filesystem cleanup."
+        )
+
+    cleanup_errors: list[str] = []
+
+    # Remove only the staged source path
+    removed_staged = False
+    if staged_path.exists() and staged_path.resolve() != (repo_root() / "plugins" / "ringer").resolve():
+        try:
+            shutil.rmtree(staged_path)
+            removed_staged = True
+        except Exception as exc:
+            message = f"Failed to remove staged path {staged_path}: {exc}"
+            cleanup_errors.append(message)
+            print(message, file=sys.stderr)
+
+    # Remove the marketplace entry
     removed_entry = False
-    if config_path.exists():
-        settings = load_toml_settings(config_path)
-        removed_entry = _remove_ringer_plugin(settings)
-        if removed_entry:
-            write_toml_settings(config_path, settings)
+    if marketplace_path.exists():
+        try:
+            content = marketplace_path.read_text(encoding="utf-8").strip()
+            if content:
+                data = json.loads(content)
+                if isinstance(data, dict) and "plugins" in data and isinstance(data["plugins"], list):
+                    plugins = data["plugins"]
+                    new_plugins = []
+                    for item in plugins:
+                        if isinstance(item, dict) and item.get("name") == "ringer":
+                            removed_entry = True
+                        else:
+                            new_plugins.append(item)
+                    data["plugins"] = new_plugins
+
+                    if not new_plugins:
+                        del data["plugins"]
+                        if "interface" in data:
+                            if isinstance(data["interface"], dict):
+                                int_keys = [k for k in data["interface"] if k != "displayName"]
+                                if not int_keys:
+                                    del data["interface"]
+
+                    other_keys = [k for k in data if k != "name"]
+                    if not other_keys:
+                        try:
+                            marketplace_path.unlink()
+                        except Exception as exc:
+                            raise OSError(
+                                f"unable to remove empty marketplace {marketplace_path}"
+                            ) from exc
+                    else:
+                        # Sibling temp plus replace write
+                        temp_path = marketplace_path.with_name(
+                            f".{marketplace_path.name}.{os.getpid()}.tmp"
+                        )
+                        try:
+                            temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                            temp_path.replace(marketplace_path)
+                        except Exception as e:
+                            if temp_path.exists():
+                                try:
+                                    temp_path.unlink()
+                                except Exception:
+                                    pass
+                            raise e
+        except Exception as exc:
+            message = f"Failed to remove marketplace entry from {marketplace_path}: {exc}"
+            cleanup_errors.append(message)
+            print(message, file=sys.stderr)
+
+    # Clean up empty parent directories of marketplace_path
+    if not marketplace_path.exists():
+        p = marketplace_path.parent
+        while p and p != p.parent:
+            if p == Path.cwd() or p == Path.home() or p == repo_root():
+                break
+            try:
+                if p.exists() and not any(p.iterdir()):
+                    p.rmdir()
+                else:
+                    break
+            except Exception:
+                break
+            p = p.parent
+
+    # Clean legacy Ringer state
+    cleanup_legacy_codex(project)
 
     scope = "project" if project else "user"
     print(f"Uninstalled ringer codex plugin for {scope} scope.")
-    print(f"Plugin removed: {'yes' if removed_plugin else 'no'}")
-    print(f"[plugins.ringer] entry removed: {'yes' if removed_entry else 'no'}")
-    return 0
-
-
-def _rewrite_plugin_hook_command(hooks_json_path: Path, real_command: str) -> None:
-    """Replace the __RINGER_NUDGE_PATH__ placeholder in the plugin's hooks.json."""
-    payload = json.loads(hooks_json_path.read_text(encoding="utf-8"))
-    hooks = payload.get("hooks")
-    if not isinstance(hooks, dict):
-        return
-    for group in hooks.get("PreToolUse", []):
-        if not isinstance(group, dict):
-            continue
-        for handler in group.get("hooks", []):
-            if isinstance(handler, dict) and handler.get("type") == "command":
-                handler["command"] = real_command
-    hooks_json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(f"Staged source removed: {'yes' if removed_staged else 'no'}")
+    print(f"Marketplace entry removed: {'yes' if removed_entry else 'no'}")
+    if not cli_attempted:
+        print(
+            "Note: codex CLI was not invoked because it is not on PATH. "
+            "Re-run with codex installed to drop the plugin from the Codex cache."
+        )
+    return cli_rc if cli_rc else (1 if cleanup_errors else 0)
 
 
 def _register_ringer_plugin(settings: dict[str, Any]) -> bool:
