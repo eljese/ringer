@@ -58,6 +58,7 @@ DEFAULT_CATALOG_SOURCE = "https://openrouter.ai/api/v1/models"
 CATALOG_AUTO_REFRESH_MAX_AGE_S = 24 * 60 * 60
 CATALOG_FETCH_TIMEOUT_S = 5
 DEFAULT_TOKEN_REGEX = r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"
+DEFAULT_CODEX_MODEL_REPORT_REGEX = r"(?m)^model:[ \t]*([^ \t\r\n]+)[ \t]*\r?$"
 ACTIVITY_TAIL_BYTES = 2048
 ACTIVITY_TEXT_LIMIT = 80
 ARTIFACT_WRAPPER_TAIL_BYTES = 256 * 1024
@@ -112,6 +113,7 @@ class EngineConfig:
     full_access_args: tuple[str, ...]
     sandbox_args: tuple[str, ...]
     token_regex: str | None = DEFAULT_TOKEN_REGEX
+    model_report_regex: str | None = None
     # Fills the {model} placeholder in args_template when a task does not set
     # its own "model" — this is what makes a harness engine (OpenCode) model
     # agnostic instead of hard-coding one model into the command line.
@@ -511,6 +513,7 @@ def built_in_codex_engine() -> EngineConfig:
         full_access_args=("--dangerously-bypass-approvals-and-sandbox",),
         sandbox_args=("--sandbox", "workspace-write"),
         token_regex=DEFAULT_TOKEN_REGEX,
+        model_report_regex=DEFAULT_CODEX_MODEL_REPORT_REGEX,
     )
 
 
@@ -588,6 +591,20 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
                 re.compile(token_regex, flags=re.IGNORECASE)
             except re.error as exc:
                 raise ValueError(f"engines.{clean_name}.token_regex is invalid: {exc}") from exc
+        model_report_regex = optional_string(section.get("model_report_regex"))
+        if model_report_regex is None and base is not None:
+            model_report_regex = base.model_report_regex
+        if model_report_regex:
+            try:
+                compiled_report = re.compile(model_report_regex, flags=re.IGNORECASE)
+            except re.error as exc:
+                raise ValueError(
+                    f"engines.{clean_name}.model_report_regex is invalid: {exc}"
+                ) from exc
+            if compiled_report.groups < 1:
+                raise ValueError(
+                    f"engines.{clean_name}.model_report_regex must have a capture group"
+                )
         model_default = str(
             section.get("model_default", base.model_default if base else "")
         ).strip()
@@ -598,6 +615,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             full_access_args=full_access_args,
             sandbox_args=sandbox_args,
             token_regex=token_regex,
+            model_report_regex=model_report_regex,
             model_default=model_default,
         )
     return engines
@@ -1050,6 +1068,7 @@ class WorkerResult:
     timed_out: bool
     tokens: int | None
     error: str | None = None
+    reported_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -5067,6 +5086,8 @@ class ModelIdentity:
     alias: bool = False
     confidence: str = ""
     source: str = ""
+    last_verified: str = ""
+    unregistered: bool = False
 
 
 @dataclass(frozen=True)
@@ -5083,25 +5104,27 @@ class ModelIdentityRegistry:
         if identity is not None:
             return identity
         meta = self.engine_meta.get(engine_key)
-        if engine_key == "opencode" and raw_model_key.startswith("openrouter/"):
+        if raw_model_key.startswith("openrouter/"):
             slug = raw_model_key.removeprefix("openrouter/")
             org = slug.split("/", 1)[0] if "/" in slug else ""
             return ModelIdentity(
-                model_display=slug,
-                lab=f"{org}?" if org else "(unknown)",
+                model_display=raw_model_key,
+                lab=f"{org}?" if org else "(unverified)",
                 harness=(meta.harness if meta else "OpenCode"),
                 access=(meta.access if meta else "OpenRouter API"),
                 confidence="fallback",
                 source="unlisted OpenRouter slug",
+                unregistered=True,
             )
-        if meta is not None and lookup_key:
+        if raw_model_key:
             return ModelIdentity(
-                model_display=lookup_key,
-                lab="(unknown)",
-                harness=meta.harness,
-                access=meta.access,
+                model_display=raw_model_key,
+                lab="(unverified)",
+                harness=meta.harness if meta else (engine_key or "unknown"),
+                access=meta.access if meta else "unknown",
                 confidence="fallback",
-                source="engine default model key",
+                source="unregistered model slug",
+                unregistered=True,
             )
         unknown = engine_key or "unknown"
         return ModelIdentity(
@@ -5166,6 +5189,7 @@ def load_model_identity_registry(path: Path | None = None) -> ModelIdentityRegis
                 alias=bool(raw_model.get("alias", False)),
                 confidence=model_log_text(raw_model.get("confidence")),
                 source=model_log_text(raw_model.get("source")),
+                last_verified=model_log_text(raw_model.get("last_verified")),
             )
     return ModelIdentityRegistry(identities, defaults, engine_meta)
 
@@ -5184,6 +5208,8 @@ def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) ->
             "harness": meta.harness if meta else (engine or "unknown"),
             "access": meta.access if meta else "unknown",
             "alias": False,
+            "last_verified": "",
+            "unregistered": False,
         }
     identity = registry.resolve(model_log_row_engine(row), model_log_text(row.get("model")))
     return {
@@ -5192,6 +5218,8 @@ def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) ->
         "harness": identity.harness,
         "access": identity.access,
         "alias": identity.alias,
+        "last_verified": identity.last_verified,
+        "unregistered": identity.unregistered,
     }
 
 
@@ -5216,7 +5244,9 @@ def enrich_model_groups_with_identity(
     registry: ModelIdentityRegistry,
     *,
     include_task_type: bool,
+    catalog_models: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    catalog_by_id = catalog_models_by_id(catalog_models or [])
     identity_rows: dict[tuple[Any, ...], dict[str, Any]] = {}
     latest: dict[tuple[Any, ...], str] = {}
     for row in task_final_rows(rows):
@@ -5236,7 +5266,12 @@ def enrich_model_groups_with_identity(
         logged_at = model_log_text(row.get("logged_at"))
         if key not in latest or logged_at >= latest[key]:
             latest[key] = logged_at
-            identity_rows[key] = row_identity_fields(row, registry)
+            identity = row_identity_fields(row, registry)
+            if identity.get("unregistered"):
+                identity.update(
+                    catalog_identity_fields(model_log_text(row.get("model")), catalog_by_id)
+                )
+            identity_rows[key] = identity
     enriched: list[dict[str, Any]] = []
     for group in groups:
         key = (
@@ -5265,6 +5300,8 @@ def enrich_model_groups_with_identity(
                     "harness": "unknown",
                     "access": "unknown",
                     "alias": False,
+                    "last_verified": "",
+                    "unregistered": bool(group.get("model")),
                 },
             )
         )
@@ -5336,7 +5373,7 @@ def create_read_model_schema(conn: Any) -> None:
         row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         if row is not None:
             schema_version = int(row[0])
-    needs_stamp = user_version != 2 or schema_version != 2
+    needs_stamp = user_version != 3 or schema_version != 3
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS schema_version (
@@ -5350,6 +5387,8 @@ def create_read_model_schema(conn: Any) -> None:
             logged_at TEXT,
             engine TEXT,
             model TEXT,
+            reported_model TEXT,
+            expected_model TEXT,
             reasoning_effort TEXT,
             task_type TEXT,
             retry INTEGER,
@@ -5392,6 +5431,7 @@ def create_read_model_schema(conn: Any) -> None:
             alias INTEGER,
             confidence TEXT,
             source TEXT,
+            last_verified TEXT,
             PRIMARY KEY (engine, model_key)
         );
         CREATE TABLE IF NOT EXISTS identity_defaults (
@@ -5408,16 +5448,22 @@ def create_read_model_schema(conn: Any) -> None:
     )
     if not read_model_column_exists(conn, "attempts", "reasoning_effort"):
         conn.execute("ALTER TABLE attempts ADD COLUMN reasoning_effort TEXT")
+    if not read_model_column_exists(conn, "attempts", "reported_model"):
+        conn.execute("ALTER TABLE attempts ADD COLUMN reported_model TEXT")
+    if not read_model_column_exists(conn, "attempts", "expected_model"):
+        conn.execute("ALTER TABLE attempts ADD COLUMN expected_model TEXT")
     if not read_model_column_exists(conn, "identity", "lab"):
         conn.execute("ALTER TABLE identity ADD COLUMN lab TEXT")
     if not read_model_column_exists(conn, "identity", "alias"):
         conn.execute("ALTER TABLE identity ADD COLUMN alias INTEGER")
+    if not read_model_column_exists(conn, "identity", "last_verified"):
+        conn.execute("ALTER TABLE identity ADD COLUMN last_verified TEXT")
     if needs_stamp:
         conn.executescript(
             """
             DELETE FROM schema_version;
-            INSERT INTO schema_version(version) VALUES (2);
-            PRAGMA user_version = 2;
+            INSERT INTO schema_version(version) VALUES (3);
+            PRAGMA user_version = 3;
             """
         )
 
@@ -5503,6 +5549,8 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
                 model_log_text(row.get("logged_at")),
                 model_log_row_engine(row),
                 model_log_text(row.get("model")),
+                model_log_text(row.get("reported_model")) or None,
+                model_log_text(row.get("expected_model")) or None,
                 model_log_row_reasoning_effort(row),
                 model_log_text(row.get("task_type")),
                 1 if model_log_row_is_retry(row) else 0,
@@ -5516,10 +5564,11 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
         conn.executemany(
             """
             INSERT INTO attempts (
-                run_id, task_key, logged_at, engine, model, reasoning_effort, task_type, retry,
+                run_id, task_key, logged_at, engine, model, reported_model, expected_model,
+                reasoning_effort, task_type, retry,
                 verdict, duration_ms, worker_tokens, orchestrator
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             payloads,
         )
@@ -5671,9 +5720,10 @@ def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
         conn.executemany(
             """
             INSERT INTO identity (
-                engine, model_key, model_display, lab, harness, access, alias, confidence, source
+                engine, model_key, model_display, lab, harness, access, alias, confidence, source,
+                last_verified
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -5686,6 +5736,7 @@ def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
                     1 if identity.alias else 0,
                     identity.confidence,
                     identity.source,
+                    identity.last_verified,
                 )
                 for (engine, model_key), identity in sorted(registry.identities.items())
             ],
@@ -5803,6 +5854,7 @@ def load_identity_registry_from_db(conn: Any) -> ModelIdentityRegistry:
             alias=bool(row["alias"]),
             confidence=model_log_text(row["confidence"]),
             source=model_log_text(row["source"]),
+            last_verified=model_log_text(row["last_verified"]),
         )
     for row in conn.execute("SELECT * FROM identity_defaults"):
         engine = model_log_text(row["engine"])
@@ -5828,7 +5880,8 @@ def db_attempt_rows(
 ) -> tuple[list[dict[str, Any]], ModelIdentityRegistry]:
     with contextlib.closing(connect_read_model_db_readonly(db_path)) as conn:
         query = """
-            SELECT run_id, task_key, logged_at, engine, model, reasoning_effort, task_type, retry,
+            SELECT run_id, task_key, logged_at, engine, model, reported_model, expected_model,
+                   reasoning_effort, task_type, retry,
                    verdict, duration_ms, worker_tokens, orchestrator
             FROM attempts
         """
@@ -5844,6 +5897,8 @@ def db_attempt_rows(
                 "logged_at": row["logged_at"],
                 "worker_engine": row["engine"],
                 "model": row["model"],
+                "reported_model": row["reported_model"],
+                "expected_model": row["expected_model"],
                 "reasoning_effort": row["reasoning_effort"],
                 "task_type": row["task_type"],
                 "retry": bool(row["retry"]),
@@ -6077,6 +6132,31 @@ def catalog_models_by_id(catalog_models: list[dict[str, Any]]) -> dict[str, dict
         if model_id:
             by_id[model_id] = normalize_catalog_for_scoreboard(model)
     return by_id
+
+
+def catalog_identity_fields(
+    model_key: str,
+    catalog_by_id: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    if not model_key.startswith("openrouter/"):
+        return {}
+    catalog_id = model_key.removeprefix("openrouter/")
+    model = catalog_by_id.get(catalog_id) or catalog_by_id.get(model_key)
+    if model is None:
+        return {}
+    name = model_log_text(model.get("name"))
+    if not name or name in {catalog_id, model_key}:
+        return {}
+    display = name.removesuffix(" (free)").strip()
+    org = catalog_id.split("/", 1)[0] if "/" in catalog_id else ""
+    lab = f"{org}?" if org else "(unverified)"
+    if ":" in display:
+        prefix, candidate = (part.strip() for part in display.split(":", 1))
+        if candidate:
+            display = candidate
+        if prefix:
+            lab = f"{prefix}?"
+    return {"model_display": display, "lab": lab}
 
 
 def model_scoreboard_tier(tasks: int, first_try_pass_rate: float) -> str:
@@ -6606,6 +6686,12 @@ MODEL_SCOREBOARD_CSS = """
     font-size: 12px;
     overflow-wrap: anywhere;
   }
+  .identity-flag, .verified-date {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 11px;
+  }
   .tier-badge {
     display: inline-flex;
     align-items: center;
@@ -6802,6 +6888,7 @@ def render_model_table_pair(
     lab = str(row.get("lab") or "(unknown)")
     harness = str(row.get("harness") or "unknown")
     access = str(row.get("access") or "unknown")
+    last_verified = str(row.get("last_verified") or "")
     notes = model_judgment_notes(model_id, notes_sections)
     if row.get("unattributed"):
         model_id_line = (
@@ -6818,10 +6905,18 @@ def render_model_table_pair(
         if row.get("show_reasoning_effort") or row.get("unattributed")
         else model_id
     )
+    unregistered_flag = (
+        '<span class="identity-flag">unregistered</span>' if row.get("unregistered") else ""
+    )
+    verified_date = (
+        f'<span class="verified-date">verified {html_escape(last_verified)}</span>'
+        if last_verified
+        else ""
+    )
     return f"""<tr class="model-row" id="model-{html_escape(sanitize_artifact_name(row_id))}">
       <td class="rank-cell num">{rank_display}</td>
-      <td class="model-cell"><div class="model-name">{html_escape(model_display)}</div>{model_id_line}</td>
-      <td>{html_escape(lab)}</td>
+      <td class="model-cell"><div class="model-name">{html_escape(model_display)}</div>{model_id_line}{unregistered_flag}</td>
+      <td>{html_escape(lab)}{verified_date}</td>
       <td>{html_escape(harness)}</td>
       <td>{html_escape(access)}</td>
       <td><span class="tier-badge {html_escape(tier)}">{html_escape(tier_display)}</span></td>
@@ -6889,6 +6984,16 @@ def render_model_scoreboard_html(
     table_rows = "".join(rendered_rows)
     if not table_rows:
         table_rows = '<tr><td colspan="11" class="muted">No local model evidence matched these filters.</td></tr>'
+    unregistered_slugs = sorted(
+        {str(row.get("model") or "") for row in ordered if row.get("unregistered") and row.get("model")}
+    )
+    unregistered_pointer = ""
+    if unregistered_slugs:
+        pointer = (
+            f"Unregistered model slug(s): {', '.join(unregistered_slugs)} "
+            "— run the identity procedure in docs/TAXONOMY.md."
+        )
+        unregistered_pointer = f'<div class="identity-pointer">{html_escape(pointer)}</div>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -6936,6 +7041,7 @@ def render_model_scoreboard_html(
   </main>
   <footer class="scoreboard-footer">
     <span>{fmt_int(rows_read)} rows read, {fmt_int(skipped)} skipped lines. Ranking sorts by evidence tier first: proven n&gt;=3, then probation; ties use first-try pass rate, pass rate, then lower estimated cost. Unattributed legacy rows are quarantined at the bottom and are not ranked or tiered. Cost estimate assumes logged worker_tokens are split 50/50 between prompt and completion tokens, using the catalog $/M in/out blend.</span>
+    {unregistered_pointer}
   </footer>
 </div>
 </body>
@@ -7001,6 +7107,8 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
             display = f"{display} [{group.get('engine') or 'unknown'}]"
         elif display != group["model"]:
             display = f"{display} ({group['model']})"
+        if group.get("unregistered"):
+            display = f"{display} [unregistered]"
         print(
             f"{group['task_type']:<18} {shorten(display, 32):<32} "
             f"{shorten(str(group.get('lab') or '(unknown)'), 20):<20} "
@@ -7011,6 +7119,14 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
             f"{tokens:>8} {group['last_seen']}"
         )
     print("Judgment layer: docs/MODEL-NOTES.md")
+    unregistered_slugs = sorted(
+        {str(group.get("model") or "") for group in groups if group.get("unregistered") and group.get("model")}
+    )
+    if unregistered_slugs:
+        print(
+            f"Unregistered model slug(s): {', '.join(unregistered_slugs)} "
+            "— run the identity procedure in docs/TAXONOMY.md."
+        )
 
 
 def build_models_api_payload(
@@ -7058,12 +7174,14 @@ def build_models_api_payload(
         rows,
         identity_registry,
         include_task_type=True,
+        catalog_models=catalog_models,
     )
     rollup = enrich_model_groups_with_identity(
         aggregate_model_scoreboard_rows(rows),
         rows,
         identity_registry,
         include_task_type=False,
+        catalog_models=catalog_models,
     )
     catalog_by_id = catalog_models_by_id(catalog_models)
     ordered_rollup: list[dict[str, Any]] = []
@@ -7114,14 +7232,15 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
         rows, skipped = read_model_log_rows(log_path, since=since, engine=args.engine)
         identity_registry = load_model_identity_registry(registry_path)
         catalog_models_from_db = []
+    catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
     groups = enrich_model_groups_with_identity(
         aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model),
         rows,
         identity_registry,
         include_task_type=True,
+        catalog_models=catalog_models,
     )
     if args.explore:
-        catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
         print_model_explore(
             log_path=log_path,
             rows_read=len(rows),
@@ -7134,13 +7253,13 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
     html_arg = getattr(args, "html", None)
     open_requested = bool(getattr(args, "open", False))
     if html_arg is not None or open_requested:
-        catalog_models = catalog_models_from_db if using_db else load_catalog_snapshot(catalog_path)
         notes_path = (getattr(args, "notes_file", None) or default_model_notes_path()).expanduser().resolve()
         scoreboard_rows = enrich_model_groups_with_identity(
             aggregate_model_scoreboard_rows(rows, task_type=args.task_type, model=args.model),
             rows,
             identity_registry,
             include_task_type=False,
+            catalog_models=catalog_models,
         )
         explicit_path = None
         if html_arg not in {None, ""}:
@@ -7651,10 +7770,16 @@ class RingerRunner:
             self.active_processes.pop(proc.pid, None)
         output_tail = capture.text()
         tokens = parse_token_count(output_tail, engine.token_regex)
+        reported_model = parse_reported_model(output_tail, engine.model_report_regex)
         if timed_out:
             append_text(log_path, f"\n[ringer.py] worker timed out after {runtime.task.timeout_s}s\n")
         append_text(log_path, f"[ringer.py] attempt {attempt} exited rc={proc.returncode}\n")
-        return WorkerResult(returncode=proc.returncode, timed_out=timed_out, tokens=tokens)
+        return WorkerResult(
+            returncode=proc.returncode,
+            timed_out=timed_out,
+            tokens=tokens,
+            reported_model=reported_model,
+        )
 
     async def _tee_stream(
         self,
@@ -7688,18 +7813,29 @@ class RingerRunner:
         duration_ms: int,
     ) -> None:
         engine = self.config.engines.get(runtime.task.engine)
-        resolved_model = (
-            runtime.task.model
-            or (engine.model_default if engine else "")
-            or effective_model_from_command(runtime.last_worker_command)
+        resolved_model = resolved_task_model(
+            runtime.task,
+            engine,
+            runtime.last_worker_command,
         )
+        reported_model = model_log_text(worker.reported_model) or None
+        mismatch = bool(reported_model and resolved_model and reported_model != resolved_model)
+        stamped_model = reported_model or resolved_model
+        expected_model = resolved_model if mismatch else None
+        if mismatch:
+            with contextlib.suppress(Exception):
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] identity: harness reported {reported_model} "
+                    f"but manifest/config expected {resolved_model}\n",
+                )
         reasoning_effort = effective_reasoning_effort_from_command(
             runtime.last_worker_command
         )
         notes_parts = [
             f"retry={'true' if retrying else 'false'}",
             f"worker_returncode={worker.returncode}",
-            f"model={resolved_model}",
+            f"model={stamped_model}",
             f"task_type={runtime.task.task_type}",
         ]
         if worker.error:
@@ -7711,7 +7847,7 @@ class RingerRunner:
         with contextlib.suppress(Exception):
             self._write_steering_observation(
                 runtime,
-                resolved_model=resolved_model,
+                resolved_model=stamped_model,
                 retrying=retrying,
                 worker=worker,
                 verify=verify,
@@ -7732,7 +7868,9 @@ class RingerRunner:
                 "worker_tokens": worker.tokens,
                 "notes": "\n".join(notes_parts),
                 "orchestrator": self.identity,
-                "model": resolved_model,
+                "model": stamped_model,
+                "reported_model": reported_model,
+                "expected_model": expected_model,
                 "reasoning_effort": reasoning_effort,
                 "task_type": runtime.task.task_type,
                 "retry": retrying,
@@ -7950,6 +8088,16 @@ def parse_token_count(text: str, token_regex: str | None = DEFAULT_TOKEN_REGEX) 
     if not matches:
         return None
     return int(matches[-1].replace(",", ""))
+
+
+def parse_reported_model(text: str, model_report_regex: str | None) -> str | None:
+    if not model_report_regex:
+        return None
+    match = re.search(model_report_regex, text, flags=re.IGNORECASE)
+    if match is None or match.lastindex is None:
+        return None
+    value = match.group(1).strip()
+    return value or None
 
 
 def effective_model_from_command(command: list[str]) -> str:

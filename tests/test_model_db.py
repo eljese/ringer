@@ -180,8 +180,8 @@ class ModelDbTests(unittest.TestCase):
             conn.commit()
 
         self.assertEqual("wal", str(journal_mode).lower())
-        self.assertEqual(2, user_version)
-        self.assertEqual(2, version)
+        self.assertEqual(3, user_version)
+        self.assertEqual(3, version)
 
     def test_rebuild_ingests_rows_and_counts_skipped_lines(self) -> None:
         write_jsonl(
@@ -430,8 +430,9 @@ class ModelDbTests(unittest.TestCase):
 
         self.assertEqual(("GPT-5.5", "Codex CLI", "OAuth plan"), (codex.model_display, codex.harness, codex.access))
         self.assertEqual(("GLM 5.2", "OpenCode", "OpenRouter API"), (listed.model_display, listed.harness, listed.access))
-        self.assertEqual(("vendor/model", "OpenCode", "OpenRouter API"), (unlisted.model_display, unlisted.harness, unlisted.access))
-        self.assertEqual(("custom-engine", "custom-engine", "unknown"), (unknown.model_display, unknown.harness, unknown.access))
+        self.assertEqual(("openrouter/vendor/model", "OpenCode", "OpenRouter API"), (unlisted.model_display, unlisted.harness, unlisted.access))
+        # Unknown engine + model: display the MODEL slug, never the engine name.
+        self.assertEqual(("custom-model", "custom-engine", "unknown"), (unknown.model_display, unknown.harness, unknown.access))
 
     def test_models_json_includes_identity_fields(self) -> None:
         write_jsonl(
@@ -455,7 +456,7 @@ class ModelDbTests(unittest.TestCase):
         self.assertEqual("codex", legacy["engine"])
         self.assertTrue(legacy["unattributed"])
         self.assertNotIn("GPT-5.5", json.dumps(payload))
-        self.assertEqual("vendor/model", by_model["openrouter/vendor/model"]["model_display"])
+        self.assertEqual("openrouter/vendor/model", by_model["openrouter/vendor/model"]["model_display"])
         self.assertEqual("OpenCode", by_model["openrouter/vendor/model"]["harness"])
         self.assertEqual("OpenRouter API", by_model["openrouter/vendor/model"]["access"])
         self.assertEqual("vendor?", by_model["openrouter/vendor/model"]["lab"])

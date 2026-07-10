@@ -193,7 +193,7 @@ source = "fixture"
         alias = registry.resolve("demo", "demo-alias")
         self.assertEqual(("DemoLab", True), (alias.lab, alias.alias))
         self.assertEqual("vendor?", registry.resolve("opencode", "openrouter/vendor/model").lab)
-        self.assertEqual("(unknown)", registry.resolve("custom", "model").lab)
+        self.assertEqual("(unverified)", registry.resolve("custom", "model").lab)
 
     def test_attempt_logging_records_explicit_effort_and_null_when_absent(self) -> None:
         log_path = self.root / "attempts.jsonl"
@@ -296,8 +296,8 @@ source = "fixture"
             self.assertEqual(("gpt-5.5", "PASS", None), conn.execute(
                 "SELECT model, verdict, reasoning_effort FROM attempts"
             ).fetchone())
-            self.assertEqual(2, conn.execute("PRAGMA user_version").fetchone()[0])
-            self.assertEqual(2, conn.execute("SELECT version FROM schema_version").fetchone()[0])
+            self.assertEqual(3, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(3, conn.execute("SELECT version FROM schema_version").fetchone()[0])
 
 
 if __name__ == "__main__":
