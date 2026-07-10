@@ -12,18 +12,36 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _make_codex_binary(tmp: Path) -> None:
+    """Stage a fake 'codex' binary inside tmp/bin so codex_cli_present() returns True."""
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir(exist_ok=True, parents=True)
+    codex_path = bin_dir / "codex"
+    codex_path.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.exit(0)\n",
+        encoding="utf-8"
+    )
+    codex_path.chmod(0o755)
+
+
 class AgentInstallTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / "home"
         self.ringer_home = Path(self.tmp.name) / "ringer-home"
+        self.fake_bin_root = Path(self.tmp.name) / "fake-bin"
+        self.fake_bin_root.mkdir()
         self.home.mkdir()
+        _make_codex_binary(self.fake_bin_root)
 
     def run_cli(self, *args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["HOME"] = str(self.home)
         env["RINGER_HOME"] = str(self.ringer_home)
+        env["PATH"] = os.pathsep.join([str(self.fake_bin_root / "bin"), env.get("PATH", "")])
         return subprocess.run(
             [sys.executable, "ringer.py", *args],
             cwd=str(cwd),

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 __RINGER_NUDGE_PATH__ pre-bash"
+            "command": "python3 ${PLUGIN_ROOT}/hooks/ringer_nudge.py pre-bash"
           }
         ]
       }
