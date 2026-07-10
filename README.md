@@ -138,7 +138,7 @@ Run one command:
 By default this installs the ringer scaffolding for **both** engines:
 
 - **Claude Code**: the ringer skill at `~/.claude/skills/ringer/SKILL.md` plus two hooks in `~/.claude/settings.json` — a `PreToolUse Bash` hook that notices model-calling or harness commands running outside a live Ringer run, and a `PostToolUse Edit|Write` hook that notices batch editing without a run. Each hook nudges ONCE per session, pointing the agent at the skill.
-- **Codex CLI**: a minimal ringer plugin at `~/.codex/plugins/ringer/` registered in `~/.codex/config.toml` as `[plugins.ringer] enabled = true`, carrying the same skill and a `PreToolUse Bash` hook. Codex only delivers Bash events to user-config and plugin hooks, so the edit-loop nudge is Claude-only; the Bash hook handles model/harness detection on the Codex side.
+- **Codex CLI**: a ringer plugin staged at `~/plugins/ringer/` (or project equivalent) containing the default `hooks/hooks.json` configuration file and installed via a local marketplace (`~/.agents/plugins/marketplace.json`) using `codex plugin add ringer@personal`. It carries the same skill and a `PreToolUse Bash` hook. After installation, plugin hooks still require explicit user trust. To review and trust the hooks, start a new Codex session, open `/hooks`, review the exact hook, and trust it there. Codex only delivers Bash events to user-config and plugin hooks, so the edit-loop nudge is Claude-only; the Bash hook handles model/harness detection on the Codex side.
 
 The hooks never block anything. A user who says "just do it inline" is obeyed; uninstall with `./ringer.py uninstall-agent` (also installs/removes for both engines by default; use `--no-claude` / `--no-codex` to scope).
 

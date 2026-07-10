@@ -208,6 +208,29 @@ checks and raw logs support — no vibes, no worker self-reports.
   watch retry counts before scaling them into a batch (2026-07-05 focus
   group lesson).
 
+## agy (Gemini 3.5 Flash (High), Antigravity CLI)
+
+- 2026-07-09 — hermes-gmail-safe README replacement (task_type=docs,
+  ~9.5KB output, 151 lines). Attempt 1 produced a substantively correct
+  artifact but used `file:///` absolute links in the docs section AND
+  used plural forms ("attachments", "links") that the orchestrator's
+  check rejected because `\battachment\b` was anchored to the singular —
+  7 check failures. Attempt 2 fixed the link issue (relative paths) but
+  still tripped the singular-plural check on two stems (2 failures).
+  After the orchestrator loosened the check to `s?\b` stems, the
+  artifact PASSED. Workers handle plural-vs-singular mismatches in
+  adversarial checks reliably on retry; the spec should anchor safety
+  checks to lemma/stem matching from the start to avoid the burn.
+- 2026-07-09 — same repo, follow-up polish task (scope-tightened to
+  the 8 safety bullets; byte-diff check on every other line): PASS
+  attempt 1 in 65s. Voice landed in the bullets — "A compromised
+  credential should never turn your inbox into an outbound spam
+  engine" is exactly the dry, opinionated register the spec asked for.
+  Worker self-corrected an unrelated logic bug in the orchestrator's
+  check script unprompted (out-of-scope edit, but net positive). For
+  docs work, agy with `--add-dir <repo> --mode accept-edits` and a
+  strong voice section in the spec is a viable cheap lane.
+
 ## Process lessons (cross-model)
 
 - 2026-07-06 — the orchestrator's CHECKS were the day's top failure source:
