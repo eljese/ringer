@@ -117,7 +117,7 @@ Not sure what your tasks even are yet? [`docs/interview-prompt.md`](docs/intervi
 Lint checks a manifest for the mistakes that make swarms hard to trust: checks that cannot fail, silent checks, worktree deliverables that disappear, worker commits that die with deleted worktrees, serial fan-out, write collisions, and underspecified specs.
 
 ```bash
-./ringer.py lint templates/review-swarm.json
+./ringer.py lint templates/review-swarm/manifest.json
 lint: clean (1 tasks)
 ```
 
