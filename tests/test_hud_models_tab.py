@@ -94,14 +94,14 @@ class HudModelsTabTests(unittest.TestCase):
         groups_by_type = {group["task_type"]: group for group in payload["groups"]}
         self.assertEqual({"code-feature", "research"}, set(groups_by_type))
         self.assertEqual(2, groups_by_type["code-feature"]["tasks"])
-        self.assertEqual("acme/small", groups_by_type["code-feature"]["model_display"])
+        self.assertEqual("openrouter/acme/small", groups_by_type["code-feature"]["model_display"])
         self.assertEqual("OpenCode", groups_by_type["code-feature"]["harness"])
         self.assertEqual("OpenRouter API", groups_by_type["code-feature"]["access"])
 
         self.assertEqual(1, len(payload["rollup"]))
         rollup = payload["rollup"][0]
         self.assertEqual("openrouter/acme/small", rollup["model"])
-        self.assertEqual("acme/small", rollup["model_display"])
+        self.assertEqual("openrouter/acme/small", rollup["model_display"])
         self.assertEqual("proven", rollup["tier"])
         self.assertEqual(3, rollup["tasks"])
         self.assertEqual(4, rollup["attempts"])

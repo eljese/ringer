@@ -249,6 +249,7 @@ class ScoreboardPageTests(unittest.TestCase):
         expected_headers = [
             "Rank",
             "Model",
+            "Lab",
             "Harness",
             "API/Plan",
             "Tier",
@@ -271,7 +272,11 @@ class ScoreboardPageTests(unittest.TestCase):
         self.assertIn("openrouter/proven", html)
         self.assertIn("openrouter/probation", html)
         self.assertIn("openrouter/free:free", html)
-        self.assertIn('<div class="model-name">GPT-5.5</div><div class="model-id">codex</div>', html)
+        # Blank-model codex rows are quarantined, never rendered as GPT-5.5
+        # (taxonomy contract, docs/TAXONOMY.md).
+        self.assertNotIn("GPT-5.5", html)
+        self.assertIn('<div class="model-name">(unattributed legacy rows)</div>', html)
+        self.assertIn("quarantined legacy data", html)
         self.assertIn('<span class="tier-badge proven">proven</span>', html)
         self.assertIn('<span class="tier-badge probation">probation</span>', html)
         self.assertIn("n=20", html)
