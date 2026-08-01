@@ -1,5 +1,7 @@
 # Ringer
 
+[![tests](https://github.com/NateBJones-Projects/ringer/actions/workflows/tests.yml/badge.svg)](https://github.com/NateBJones-Projects/ringer/actions/workflows/tests.yml)
+
 ![Ringer — she reviews; the wall works](docs/hero.png)
 
 **Parallel AI-agent swarms that prove their work. Your expensive model plans and reviews; cheap workers do the typing.**
@@ -29,7 +31,7 @@ manifest.json ──▶ ringer.py ──▶ N parallel workers (codex exec, each
 
 ## Quickstart
 
-Ringer runs on macOS and Linux (Windows via WSL) and needs Python 3.11+.
+Ringer runs on macOS and Linux (Windows via WSL) and needs Python 3.12+.
 
 1. Install a worker CLI and sign in (Codex is the built-in default engine):
 
@@ -103,6 +105,8 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `model` | Which model a harness engine runs for this task — fills the engine's `{model}` placeholder (e.g. `"openrouter/moonshotai/kimi-k2.7"`); empty uses the engine's `model_default` |
 | `task_type` | Optional free-form string naming the kind of work this task is, so the model-performance log can slice pass rates by task shape rather than only by model. Suggested vocabulary: `code-feature`, `code-fix`, `code-review`, `test-hardening`, `docs`, `research`, `persona-review`, `copywriting`, `site-build`, `motion-design`, `image-gen`, `data-pipeline`, `format-conversion`, `probe`, `bakeoff`. Empty is allowed; the log just reports it under `(none)`. |
 | `timeout_s` | Per-task kill timer (default 900) |
+| `max_attempts` | How many times this task may run (default 2 — one try plus one retry with the check's failure output injected). Set `1` for a hard no-retry lane |
+| `redact_spec` | Replace this task's spec with `[redacted request packet]` in the run state, the logged command line, and the eval row, for specs carrying sensitive material. Redacts Ringer's own records only — captured worker output is never rewritten (invariant), so a worker that echoes its request still puts that text in `worker.log` |
 | `engine_args` | Extra CLI flags for this task's worker, spliced in at the engine's `{engine_args}` placeholder — e.g. `["-c", "model_reasoning_effort=low"]` so the orchestrator picks reasoning depth per task |
 | `verified` | One plain-English sentence saying what the check proves — shown on the results page next to "finished & checked" |
 | `full_access` | Worker runs unsandboxed — required for workers that spawn their own sub-workers; must also be enabled in config |
@@ -111,6 +115,39 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 > **Worktree footgun:** on PASS the task's worktree is removed — including anything written inside it. In worktrees mode, worker logs live outside task worktrees in `workdir/logs/`; have workers write deliverables outside the worktree too, or have your `check` copy artifacts out before it exits 0.
 
 Not sure what your tasks even are yet? [`docs/interview-prompt.md`](docs/interview-prompt.md) is a prompt you paste into any chatbot; it interviews you about the job and hands back a brief your orchestrating agent can turn into a manifest. Ready-made skeletons for the patterns that work live in [`templates/`](templates/).
+
+## `ask` — one bounded question, one clean worker
+
+Not every question deserves a manifest. When you want a read-only answer over
+source you can already point at, `ask` selects the passages that match the
+request, caps the packet, and runs a single worker on it:
+
+```bash
+./ringer.py ask "Why did the Wednesday release slip?" --source notes/status.md
+./ringer.py ask "..." --source src/ --source docs/ --dry-run   # show the packet, spend nothing
+```
+
+Repeat `--source` for more files or directories. `--state` takes a small file
+of settled decisions and is preferred over ordinary sources when the packet is
+tight. `--max-packet-bytes` sets the budget (default 16,000). `--dry-run`
+prints the selection report and stops before any model call. `--redact` keeps
+the request out of the run state and eval row. The run appears on Ringside and
+in the artifact library like any other.
+
+If everything that matches is too big for the packet, `ask` says so — naming the
+budget you'd need — and stops **before** calling a model. It never sends an
+empty packet. A source small enough to fit whole is included whole, whether or
+not it looks relevant, so pointing `ask` at unrelated material still costs one
+call: the packet is only as good as the sources you name.
+
+Directory scans stay inside the tree you named. A symlink pointing out of it, or
+one resolving to a sensitive filename, is skipped and reported. A file you name
+explicitly is always read — naming it is consent.
+
+> `ask` verifies only that an answer was produced and is non-empty. There is
+> nothing to execute against free-form prose, so this is the one lane in Ringer
+> where the check does not prove the result is right. Read the answer. Anything
+> whose output a check could actually execute belongs in a manifest.
 
 ## Lint
 
@@ -124,6 +161,16 @@ lint: clean (1 tasks)
 `run` and `demo` also print any lint findings as non-blocking warnings after the manifest loads. They teach at the moment of use; they do not stop a run.
 
 A check that cannot fail is trusting the worker with extra steps.
+
+### Baseline: prove your checks before spending tokens
+
+Lint reads the manifest; `--baseline` executes it — every task's `check` runs against the unmodified tree, spawning no workers and writing no eval rows:
+
+```bash
+./ringer.py run swarm.json --baseline
+```
+
+Each check runs in a fresh scratch dir (a detached worktree when the manifest uses worktrees) through the same verifier as a real run. Reading the results: an assertion that demands the NEW behavior workers will build is *expected* to FAIL baseline; an assertion about UNCHANGED behavior that fails baseline is a bug in the check itself, and at run time it would burn a worker's attempts against something no model can satisfy. Fix the check before spawning.
 
 ## Make your agent actually use this
 
@@ -231,6 +278,22 @@ npm install -g @anthropic-ai/claude-code
 
 Route with per-task `"engine": "claude"`. `model_default` is `claude-sonnet-4-6` (the shipped default — Anthropic's frontier coding model as of 2026-07); override per task with `"model": "claude-opus-4-7"` or `"model": "claude-haiku-4-5"` for cost-sensitive lanes. `claude --print --output-format json` exits cleanly with stdin closed and exposes token counts (input, output, cache read/write) in the JSON result — Ringer reads those straight into the `swarm_runs` row. **Sandbox is the default and the only safe option** (`--permission-mode acceptEdits` + `--allowedTools "Read Edit Write Glob Grep Bash"`); the engine's `full_access_args` flips to `--dangerously-skip-permissions` so `allow_full_access` remains the single escape hatch in the orchestrator. Verified against `claude 2.1.179` on Linux (2026-07-09); see `docs/CLAUDE-CODE-PROBE-RESULTS.md` for the harness-level evidence (`--add-dir` allow-list semantics, `--print` exit semantics, JSON token schema).
 
+`args_template` is an argv array, not a shell string. Ringer replaces `{taskdir}`, `{spec}`, and `{model}` inside each argv element. `{access_args}`, `{sandbox_args}`, `{full_access_args}`, `{model_args}` (becomes `-m <resolved model>` when the task or engine names one), and `{engine_args}` (the task's per-task `engine_args`) expand to multiple argv elements only when they appear as their own array item.
+
+Watch for variadic CLI flags. If an engine has a flag that consumes all following values, put `{spec}` before that flag. For Claude-style CLIs, prefer:
+
+```toml
+args_template = ["-p", "{spec}", "--allowedTools", "Bash"]
+```
+
+not:
+
+```toml
+args_template = ["-p", "--allowedTools", "Bash", "{spec}"]
+```
+
+Each worker process runs with cwd set to `workdir/<task.key>/`. Use absolute paths in `spec` when workers need shared inputs outside their task directory.
+
 ## Ringside — mission control
 
 ![Ringside in the browser: a run's live results page with per-worker status and verification](docs/ringside.png)
@@ -248,6 +311,24 @@ Multiple swarms at once is the designed-for case: run three batches under three 
 
 A native desktop build (Tauri, under `hud/`) exists as a v0.1.1 prototype; the web dashboard is currently ahead of it — start there.
 
+## Self-update
+
+Ringer checks `origin/main` at process start, before it dispatches the requested command. Checks are throttled to once per hour by default. You can also run `./ringer.py self-update` for an immediate, human-readable check that ignores the throttle.
+
+An automatic update applies only when the checkout containing `ringer.py` is on `main`, has no tracked changes, and `origin/main` can be reached with a fast-forward-only update. Untracked files do not block it. After applying, Ringer restarts the original invocation so the requested command runs on the new code.
+
+Ringer never creates a merge commit, never rebases, never stashes or deletes changes, and never updates a dirty tracked tree. Regular commands do not update in the middle of a run: their only check happens at process start before dispatch.
+
+The persistent `hud` command is the exception for long-running code. It checks on the configured interval and restarts itself after an ff-only update. It also restarts when the checkout's on-disk HEAD changes after a manual pull. Before restarting it closes the HTTP server, whose socket is configured for immediate reuse. If an update is available but blocked, Ringside keeps serving the running code and shows the reason in a dismissible banner.
+
+Disable automatic checks for one invocation with `--no-self-update`, for an environment or service with `RINGER_NO_SELF_UPDATE=1`, or permanently in config:
+
+```toml
+[update]
+auto = false
+check_interval_s = 3600
+```
+
 ## The eval loop
 
 ![Timed, verified, logged](docs/eval-loop.png)
@@ -258,7 +339,7 @@ Every worker attempt — pass, fail, timeout, retry — is logged with its spec,
 
 ### Model identity taxonomy
 
-The scoreboard keeps the trained model, its lab, the invoking harness, the access plan, and any explicit reasoning effort as separate fields. Reserved test names never render, and historical rows without a stamped model are quarantined instead of being credited to an engine default. See the normative [model identity taxonomy](docs/TAXONOMY.md).
+The scoreboard keeps the trained model, its lab, the invoking harness, the access plan, and any explicit reasoning effort as separate fields. Reserved test names never render, and historical rows without a stamped model are quarantined instead of being credited to an engine default. Models with a declared canonical access route are enforced at lint and run time — a manifest that reaches a model through a non-sanctioned harness/slug is refused unless you pass `--allow-noncanonical-route`, and historical rows from such routes display as `misrouted` and are never ranked. See the normative [model identity taxonomy](docs/TAXONOMY.md).
 
 Every task attempt is logged **automatically and locally** to `~/.ringer/runs.jsonl` — no setup, no account, nothing leaves your machine. Each row carries the per-attempt verdict straight from the EXECUTED check, plus duration, tokens, the resolved `model`, the task's `task_type` (if the manifest set one), and the `retry` number.
 
@@ -340,13 +421,25 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 3. **Verification executes the artifact** — an agent's own "done" is not evidence. Exit codes are.
 4. **Raw output only** — logs and eval rows carry verbatim worker output, never a summary. Anything that needs judgment reads the raw data.
 
+## Contributors
+
+Every community PR that lands in main is credited here — that's a project rule, enforced by a test. Thank you:
+
+- [@oceanonline](https://github.com/oceanonline) — portable `python3` in template checks + lint quickstart path fix (#24)
+- [@davekopecek](https://github.com/davekopecek) (Dave Kopecek) — committed the design-reference fixture so the design-token guard runs on every machine (#30)
+- [@snapsynapse](https://github.com/snapsynapse) (Sam Rogers) — graceful shutdown on SIGINT/SIGTERM with worker-tree cleanup and finished state, plus the 14-test end-to-end CLI regression suite (#4)
+- [@mlava](https://github.com/mlava) (Mark Lavercombe) — named setup failures across every diagnostic surface (#37) and `run --baseline`, the no-workers check preflight (#38)
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the philosophy and what gets a PR merged fast. The short version: small and scoped, rebased on current main, every claim backed by an executed test. Authorship is always preserved — where a maintainer pushes a mechanical fix to your branch, you remain the commit author.
+
 ## License
 
 [PolyForm Shield 1.0.0](LICENSE.md) — free to use, modify, and share, including inside your own commercial work. The one thing you can't do is offer Ringer or Ringside (or a derivative that competes with them) as a product or service of your own. Commercial rights to the tool itself belong to Nate Jones Media LLC.
 
 ## Requirements
 
-- Python 3.11+ (stdlib only; `psycopg` needed only for the optional Postgres eval backend)
+- Python 3.12+ (stdlib only; `psycopg` needed only for the optional Postgres eval backend)
+  - **Changed:** the supported floor moved from 3.11 to 3.12. CI has only ever run 3.12, so 3.11 was a promise nothing enforced — the honest fix is to state the version we actually test. Today's code still happens to run on 3.11; that is no longer guaranteed, and 3.11 breakage won't be treated as a bug.
 - At least one agent CLI (Codex works out of the box)
 - Rust toolchain, only if you're building Ringside from source
 
@@ -354,4 +447,4 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 
 ---
 
-Built by [Jon Edwards](https://limitededitionjonathan.com) and his agent fleet — a Claude orchestrator wrote the specs and reviewed the diffs, Codex swarms wrote the implementation, and this repo's own eval table caught its first three bugs. The tool is its own proof of concept.
+Built by [Nate Jones](https://natejones.com) and maintained by [LEJ](https://limitededitionjonathan.com) — a Claude orchestrator wrote the specs and reviewed the diffs, Codex swarms wrote the implementation, and this repo's own eval table caught its first three bugs. The tool is its own proof of concept.
