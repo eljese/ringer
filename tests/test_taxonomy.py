@@ -101,6 +101,13 @@ display = "GLM 5.2"
 lab = "Z.ai (Zhipu AI)"
 confidence = "verified"
 source = "fixture"
+
+[engines.opencode.models."minimax-coding-plan/MiniMax-M3"]
+display = "MiniMax M3"
+lab = "MiniMax"
+access = "MiniMax Token Plan"
+confidence = "verified"
+source = "fixture"
 """,
             encoding="utf-8",
         )
@@ -194,6 +201,12 @@ source = "fixture"
         self.assertEqual(("DemoLab", True), (alias.lab, alias.alias))
         self.assertEqual("vendor?", registry.resolve("opencode", "openrouter/vendor/model").lab)
         self.assertEqual("(unverified)", registry.resolve("custom", "model").lab)
+
+    def test_registry_allows_model_specific_access_for_provider_routes(self) -> None:
+        identity = load_model_identity_registry(self.registry_path).resolve(
+            "opencode", "minimax-coding-plan/MiniMax-M3"
+        )
+        self.assertEqual(("MiniMax", "MiniMax Token Plan"), (identity.lab, identity.access))
 
     def test_attempt_logging_records_explicit_effort_and_null_when_absent(self) -> None:
         log_path = self.root / "attempts.jsonl"
