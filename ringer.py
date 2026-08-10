@@ -94,6 +94,48 @@ CSP_META_TAG = (
 )
 DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "dashboard.html"
 RINGSIDE_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "ringside.html"
+# Lifecycle integration (PR #13 hardening, kept inline so RingerRunner.run
+# owns the invariants itself): durable worktree sealing, attempt-scoped
+# artifacts, structured argv checks, canonical path substitution, focused
+# review packets, and conservative cleanup. The companion CLI in
+# tools/ringer_lifecycle.py exposes the same vocabulary; ringer.py is the
+# enforcement path.
+LIFECYCLE_FAILURE_CLASSES = (
+    "WORKER_FINDING",
+    "CHECK_FAILURE",
+    "PROVIDER_QUOTA",
+    "PROVIDER_TIMEOUT",
+    "NETWORK_SANDBOX",
+    "STALE_WORKTREE",
+    "STALE_ARTIFACT",
+    "MISSING_EXPORT",
+    "MANIFEST_PATH_ERROR",
+    "SHELL_INTERPOLATION",
+    "COORDINATOR_ERROR",
+)
+# Failure classes that are not substantive code findings. They never count
+# as a real "the worker got it wrong" failure, and they never block a
+# sealed-pass lifecycle outcome on their own.
+LIFECYCLE_INFRASTRUCTURE_CLASSES = frozenset(
+    {
+        "PROVIDER_QUOTA",
+        "PROVIDER_TIMEOUT",
+        "NETWORK_SANDBOX",
+        "STALE_WORKTREE",
+        "STALE_ARTIFACT",
+        "MANIFEST_PATH_ERROR",
+    }
+)
+LIFECYCLE_OWNERSHIP_MARKER = ".ringer-lifecycle.json"
+LIFECYCLE_REPORT_NAMES = frozenset(
+    {"report.md", "report.html", "fix-summary.md", "notes.md"}
+)
+LIFECYCLE_PATCH_SUFFIX = ".patch"
+LIFECYCLE_META_SUFFIX = ".meta.json"
+LIFECYCLE_OWNER_NAME = "ringer-lifecycle"
+REVIEW_PACKET_DEFAULT_MAX_BYTES = 96 * 1024
+REVIEW_PACKET_FILE_BYTES = 64 * 1024
+REVIEW_PACKET_REPO_BYTES = 96 * 1024
 MINIMAL_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>ringer dashboard</title></head>
@@ -1629,7 +1671,12 @@ def require_bool(value: Any, key: str, field: str) -> bool:
 class TaskSpec:
     key: str
     spec: str
-    check: str
+    # `check` may be either a shell-mode command string (existing behavior)
+    # or a structured {"argv": [...]} mapping. The structured form runs
+    # through asyncio.create_subprocess_exec with shlex.join, so literal
+    # `${{ ... }}` source text and absolute paths survive intact instead
+    # of being interpreted by /bin/sh. Verifier dispatches on the type.
+    check: str | dict[str, Any]
     engine: str = DEFAULT_ENGINE_NAME
     expect_files: tuple[str, ...] = ()
     timeout_s: int = DEFAULT_TIMEOUT_S
@@ -1657,10 +1704,16 @@ class TaskSpec:
         if not spec:
             raise ValueError(f"task {key}: spec is required")
         check = obj.get("check", "")
-        if not isinstance(check, str):
-            raise ValueError(f"task {key}: check must be a string")
-        if not check:
-            raise ValueError(f"task {key}: check is required")
+        if isinstance(check, str):
+            if not check:
+                raise ValueError(f"task {key}: check is required")
+        elif is_lifecycle_argv_check(check):
+            # Already validated by is_lifecycle_argv_check.
+            pass
+        else:
+            raise ValueError(
+                f"task {key}: check must be a string or an object containing only an argv list"
+            )
         expect_files = obj.get("expect_files", [])
         if not isinstance(expect_files, list):
             raise ValueError(f"task {key}: expect_files must be a list")
@@ -1815,12 +1868,16 @@ def lint_manifest(
         findings.append("manifest: run_name model-scoreboard is reserved for the scoreboard page.")
 
     for task in manifest.tasks:
-        if check_cannot_fail(task.check):
-            findings.append(f"{task.key}: check cannot fail, so the task cannot be verified.")
-        if check_may_fail_silently(task.check):
-            findings.append(
-                f"{task.key}: check may fail without printing why; retry prompt and eval log depend on failure output."
-            )
+        # Lint only fires for shell-mode check strings. Structured argv
+        # checks pass through verbatim — the verifier already guards against
+        # silent / echo-only / never-fail shapes at execution time.
+        if isinstance(task.check, str):
+            if check_cannot_fail(task.check):
+                findings.append(f"{task.key}: check cannot fail, so the task cannot be verified.")
+            if check_may_fail_silently(task.check):
+                findings.append(
+                    f"{task.key}: check may fail without printing why; retry prompt and eval log depend on failure output."
+                )
         if manifest.worktrees and any(is_relative_expect_file(path) for path in task.expect_files):
             findings.append(
                 f"{task.key}: deliverable would be deleted with the worktree; write it outside the worktree or export it in the check."
@@ -2094,6 +2151,16 @@ class TaskRuntime:
     setup_error: str | None = None
     last_worker_command: list[str] = field(default_factory=list)
     steering: dict[str, Any] | None = None
+    # Lifecycle bookkeeping (PR #13). The invariant is enforced by
+    # RingerRunner itself, not by an optional helper.
+    failure_class: str | None = None
+    lifecycle_variables: dict[str, str] = field(default_factory=dict)
+    lifecycle_attempts: list[dict[str, Any]] = field(default_factory=list)
+    patch_path: str | None = None
+    patch_sha256: str | None = None
+    patch_meta: dict[str, Any] | None = None
+    worktree_sealed: bool = False
+    worktree_retained: bool = False
 
     def elapsed_s(self, now: float) -> float:
         if self.started_at_monotonic is None:
@@ -2118,6 +2185,582 @@ class VerifyResult:
     check_timed_out: bool
     raw_output_excerpt: str
     missing_files: tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle helpers — enforced by RingerRunner.run itself, not by an
+# optional helper or a prompt reminder. See README "Lifecycle invariants"
+# and plugins/ringer/skills/ringer-recovery/SKILL.md for the recovery flow.
+# ---------------------------------------------------------------------------
+
+
+class LifecycleError(RuntimeError):
+    """Raised when a lifecycle invariant cannot be honored."""
+
+
+def lifecycle_sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def lifecycle_atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def lifecycle_atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def lifecycle_atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(raw)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def lifecycle_repo_head(repo: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def classify_failure(text: str, *, returncode: int | None = None) -> str:
+    """Map a failure surface to one of the lifecycle failure classes.
+
+    Infrastructure classes (quota / timeout / network / stale state / path
+    mismatch) never count as substantive code findings. The verifier and
+    worker error channels funnel through here so retry budgets and operator
+    summaries speak the same vocabulary.
+    """
+    lower = text.lower()
+    if any(token in lower for token in ("quota", "rate limit", "usage limit", "credits exhausted", "billing")):
+        return "PROVIDER_QUOTA"
+    if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
+        return "PROVIDER_TIMEOUT"
+    if any(
+        token in lower
+        for token in (
+            "network is unreachable",
+            "could not resolve host",
+            "temporary failure in name resolution",
+            "connection refused",
+            "connection reset",
+            "no route to host",
+            "sandbox",
+            "permission denied",
+            "operation not permitted",
+        )
+    ):
+        return "NETWORK_SANDBOX"
+    if "worktree" in lower and any(token in lower for token in ("already exists", "stale", "left by", "used by")):
+        return "STALE_WORKTREE"
+    if "stale" in lower and any(token in lower for token in ("report", "artifact", "evidence", "ledger")):
+        return "STALE_ARTIFACT"
+    if any(
+        token in lower
+        for token in (
+            "missing export",
+            "missing expected files",
+            "patch was not exported",
+            "patch was not sealed",
+            "durable patch",
+            "no patch could be generated",
+        )
+    ):
+        return "MISSING_EXPORT"
+    if any(
+        token in lower
+        for token in (
+            "escapes workdir",
+            "expect_files",
+            "artifact path",
+            "path mismatch",
+            "manifest path",
+            "outside the worktree",
+        )
+    ):
+        return "MANIFEST_PATH_ERROR"
+    if "bad substitution" in lower or ("${{" in text and "/bin/sh" in lower and "exit " in lower):
+        return "SHELL_INTERPOLATION"
+    if any(
+        token in lower
+        for token in (
+            "worker finding",
+            "reviewer finding",
+            "code issue",
+            "substantive finding",
+            "found: ",
+            "bug: ",
+            "lint error",
+            "static analysis",
+        )
+    ):
+        return "WORKER_FINDING"
+    if returncode not in (None, 0):
+        return "CHECK_FAILURE"
+    return "COORDINATOR_ERROR"
+
+
+def is_lifecycle_argv_check(check: Any) -> bool:
+    """Structured-argv check: a dict whose only key is "argv" and whose
+    value is a non-empty list of strings. Lets the verifier run without
+    going through a shell so dollar expressions like `${{ github.sha }}`
+    survive verbatim instead of being interpreted by /bin/sh."""
+    if not isinstance(check, dict):
+        return False
+    if set(check) != {"argv"}:
+        return False
+    argv = check.get("argv")
+    return isinstance(argv, list) and bool(argv) and all(isinstance(item, str) for item in argv)
+
+
+def lifecycle_canonical_values(
+    *,
+    run_dir: Path,
+    task_dir: Path,
+    artifact_dir: Path,
+    source_repo: Path | None,
+    attempt: int,
+) -> dict[str, str]:
+    return {
+        "{{RUN_DIR}}": str(run_dir),
+        "{{TASK_DIR}}": str(task_dir),
+        "{{TASK_WORKTREE}}": str(task_dir),
+        "{{ARTIFACT_DIR}}": str(artifact_dir),
+        "{{SOURCE_REPO}}": str(source_repo) if source_repo else "",
+        "{{BASE_SHA}}": lifecycle_repo_head(source_repo) if source_repo else "",
+        "{{ATTEMPT}}": str(attempt),
+    }
+
+
+_LIFECYCLE_VAR_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
+
+
+def lifecycle_substitute(value: str, variables: dict[str, str]) -> str:
+    result = value
+    for key, replacement in variables.items():
+        result = result.replace(key, replacement)
+    unresolved = sorted(set(_LIFECYCLE_VAR_RE.findall(result)))
+    if unresolved:
+        raise LifecycleError(
+            f"unresolved lifecycle path variable(s): {', '.join(unresolved)}"
+        )
+    return result
+
+
+def normalize_check(
+    raw_check: Any,
+    variables: dict[str, str],
+) -> tuple[str, tuple[str, ...] | None]:
+    """Return a (shell_command, argv_or_none) pair.
+
+    - A string check stays in shell mode (existing behavior; bash -c style).
+    - A structured {"argv": [...]} check joins with shlex so dollar
+      expressions cannot be interpreted by the shell. argv-mode is the
+      recommended form when a check needs to handle literal `${{ ... }}`
+      or pass paths without further escaping.
+    Variables are substituted into both forms. Unresolved `{{NAME}}`
+    patterns fail closed.
+    """
+    if isinstance(raw_check, str):
+        return lifecycle_substitute(raw_check, variables), None
+    if is_lifecycle_argv_check(raw_check):
+        resolved_argv = tuple(lifecycle_substitute(item, variables) for item in raw_check["argv"])
+        return shlex.join(resolved_argv), resolved_argv
+    raise LifecycleError("check must be a string or an object containing only an argv list")
+
+
+def worktree_dirty_paths(worktree: Path, *, exclude: set[str] | None = None) -> list[str]:
+    """Return the repo-relative paths of every dirty/untracked entry in a
+    worktree, excluding lifecycle internals. Stable sort; the worker log
+    directory, the ownership marker, and any caller-supplied excludes are
+    filtered out so cleanup cannot quietly delete evidence."""
+    excluded = {LIFECYCLE_OWNERSHIP_MARKER, "worker.log", *(exclude or set())}
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), "status", "--porcelain=v1", "-z"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    entries = result.stdout.split("\0")
+    paths: list[str] = []
+    rename_source = False
+    for entry in entries:
+        if not entry:
+            continue
+        if rename_source:
+            raw = entry
+            rename_source = False
+        else:
+            raw = entry[3:] if len(entry) >= 4 else entry
+            status = entry[:2]
+            rename_source = "R" in status or "C" in status
+            if " -> " in raw:
+                raw = raw.split(" -> ", 1)[1]
+        if raw and raw not in excluded:
+            paths.append(raw)
+    return sorted(set(paths))
+
+
+def worktree_has_committed_changes(worktree: Path, source_repo: Path | None) -> bool:
+    if source_repo is None:
+        return False
+    base_sha = lifecycle_repo_head(source_repo)
+    head_sha = lifecycle_repo_head(worktree)
+    return bool(base_sha and head_sha and base_sha != head_sha)
+
+
+def export_worktree_patch(
+    worktree: Path,
+    target: Path,
+    *,
+    source_repo: Path | None = None,
+) -> Path | None:
+    """Export a binary-capable patch covering both tracked and untracked
+    file changes outside the worktree. Returns the target path on success,
+    or None when the worktree has no substantive changes. Raises
+    LifecycleError when changes exist but no patch could be generated —
+    callers MUST treat that as fail-closed (retain the worktree)."""
+    changed = worktree_dirty_paths(worktree)
+    if not changed:
+        changed = []
+    pieces: list[bytes] = []
+    base_sha = lifecycle_repo_head(source_repo) if source_repo else ""
+    worktree_head = lifecycle_repo_head(worktree)
+    if base_sha and worktree_head and base_sha != worktree_head:
+        committed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "diff",
+                "--binary",
+                f"{base_sha}..{worktree_head}",
+                "--",
+            ],
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=30,
+        )
+        if committed.returncode != 0:
+            raise LifecycleError(
+                f"could not read committed worktree diff: "
+                f"{committed.stderr.decode('utf-8', errors='replace').strip()}"
+            )
+        changed.append(f"committed HEAD {worktree_head}")
+        if committed.stdout:
+            pieces.append(committed.stdout)
+    if not changed:
+        return None
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--binary", "HEAD", "--"],
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LifecycleError(f"could not read tracked diff: {exc}") from exc
+        if tracked.stdout:
+            pieces.append(tracked.stdout)
+    try:
+        untracked = subprocess.run(
+            ["git", "-C", str(worktree), "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LifecycleError(f"could not enumerate untracked files: {exc}") from exc
+    for rel in [item for item in untracked.stdout.split("\0") if item and item not in {LIFECYCLE_OWNERSHIP_MARKER, "worker.log"}]:
+        candidate = worktree / rel
+        if not candidate.is_file():
+            continue
+        diff = subprocess.run(
+            ["git", "diff", "--binary", "--no-index", "--", "/dev/null", rel],
+            cwd=str(worktree),
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=15,
+        )
+        if diff.returncode not in (0, 1):
+            detail = diff.stdout or diff.stderr
+            raise LifecycleError(
+                f"could not export untracked file {rel}: "
+                f"{detail.decode('utf-8', errors='replace').strip()}"
+            )
+        if diff.stdout:
+            pieces.append(diff.stdout)
+    payload = b"".join(pieces)
+    if not payload.strip():
+        raise LifecycleError(
+            f"worktree has changes but no durable patch could be generated: {', '.join(changed)}"
+        )
+    lifecycle_atomic_write_bytes(target, payload)
+    return target
+
+
+def seal_worktree(
+    *,
+    task_dir: Path,
+    worktree: Path,
+    attempt: int,
+    source_repo: Path | None,
+    patch_dir: Path,
+) -> dict[str, Any]:
+    """Export a durable patch + SHA-256 metadata atomically, then verify
+    the hash. Returns the metadata record. Raises LifecycleError (which the
+    caller must treat as fail-closed — retain the worktree) when sealing
+    cannot be honored."""
+    patch_dir.mkdir(parents=True, exist_ok=True)
+    patch_path = patch_dir / f"attempt-{attempt:03d}{LIFECYCLE_PATCH_SUFFIX}"
+    meta_path = patch_dir / f"attempt-{attempt:03d}{LIFECYCLE_META_SUFFIX}"
+    patch = export_worktree_patch(worktree, patch_path, source_repo=source_repo)
+    if patch is None:
+        # Nothing to seal. We still want a meta record so consumers can
+        # tell "ran cleanly with no changes" apart from "no record at all".
+        meta = {
+            "schema_version": 1,
+            "task_dir": str(task_dir),
+            "worktree": str(worktree),
+            "attempt": attempt,
+            "source_repo": str(source_repo) if source_repo else "",
+            "base_sha": lifecycle_repo_head(source_repo) if source_repo else "",
+            "patch_path": None,
+            "patch_sha256": None,
+            "patch_bytes": 0,
+            "sealed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        lifecycle_atomic_write_json(meta_path, meta)
+        return meta
+    sha = lifecycle_sha256_file(patch)
+    meta = {
+        "schema_version": 1,
+        "task_dir": str(task_dir),
+        "worktree": str(worktree),
+        "attempt": attempt,
+        "source_repo": str(source_repo) if source_repo else "",
+        "base_sha": lifecycle_repo_head(source_repo) if source_repo else "",
+        "patch_path": str(patch),
+        "patch_sha256": sha,
+        "patch_bytes": patch.stat().st_size,
+        "sealed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Atomic write, then verify the on-disk hash matches the metadata.
+    # Any drift here means a half-written file; fail closed.
+    lifecycle_atomic_write_json(meta_path, meta)
+    written_sha = lifecycle_sha256_file(patch)
+    if written_sha != sha:
+        raise LifecycleError(
+            f"sealed patch hash drifted after write: expected {sha}, got {written_sha}"
+        )
+    reloaded = json.loads(meta_path.read_text(encoding="utf-8"))
+    if reloaded.get("patch_sha256") != sha:
+        raise LifecycleError(
+            f"sealed metadata hash drifted: expected {sha}, got {reloaded.get('patch_sha256')}"
+        )
+    return meta
+
+
+def build_review_packet(
+    repo: Path,
+    base: str,
+    head: str,
+    *,
+    tier: int,
+    max_bytes: int = REVIEW_PACKET_DEFAULT_MAX_BYTES,
+) -> str:
+    """Focused independent-review packet. Tier 1 is the exact diff only;
+    tier 2 adds changed-file context up to 64 KiB each; tier 3 adds the
+    repo's AGENTS.md and README.md up to 96 KiB each. The whole packet is
+    capped at max_bytes — reviewers see the most useful slices without the
+    full repo tree."""
+    if tier not in {1, 2, 3}:
+        raise LifecycleError("review tier must be 1, 2, or 3")
+    diff_result = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--find-renames", "--find-copies", f"{base}..{head}", "--"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    diff_text = diff_result.stdout
+    names_result = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", f"{base}..{head}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    names = [line for line in names_result.stdout.splitlines() if line]
+    chunks = [
+        f"# Review packet tier {tier}\n\n"
+        f"Base: {base}\nHead: {head}\n\n## Exact diff\n\n{diff_text}"
+    ]
+    if tier >= 2:
+        for rel in names:
+            path = repo / rel
+            try:
+                if not path.is_file() or path.stat().st_size > REVIEW_PACKET_FILE_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            chunks.append(f"\n## Changed file: {rel}\n\n{text}")
+    if tier >= 3:
+        for rel in ("AGENTS.md", "README.md"):
+            path = repo / rel
+            try:
+                if path.is_file() and path.stat().st_size <= REVIEW_PACKET_REPO_BYTES:
+                    chunks.append(
+                        f"\n## Repository context: {rel}\n\n"
+                        + path.read_text(encoding="utf-8", errors="replace")
+                    )
+            except OSError:
+                continue
+    packet = "".join(chunks)
+    raw = packet.encode("utf-8")
+    if len(raw) > max_bytes:
+        packet = raw[:max_bytes].decode("utf-8", errors="ignore") + "\n\n[packet truncated to budget]\n"
+    return packet
+
+
+def lifecycle_owned_marker_payload(
+    *,
+    task_key: str,
+    source_repo: Path | None,
+    attempt: int,
+) -> dict[str, Any]:
+    return {
+        "owner": LIFECYCLE_OWNER_NAME,
+        "task": task_key,
+        "attempt": attempt,
+        "source_repo": str(source_repo) if source_repo else "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def write_lifecycle_marker(task_dir: Path, payload: dict[str, Any]) -> Path:
+    marker = task_dir / LIFECYCLE_OWNERSHIP_MARKER
+    lifecycle_atomic_write_json(marker, payload)
+    return marker
+
+
+def read_lifecycle_marker(task_dir: Path) -> dict[str, Any] | None:
+    marker = task_dir / LIFECYCLE_OWNERSHIP_MARKER
+    if not marker.is_file():
+        return None
+    try:
+        return json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def bind_report_to_attempt(
+    *,
+    artifact_dir: Path,
+    attempt_id: str,
+    attempt_started_at: str,
+    input_tree_sha: str,
+    report_path: Path,
+) -> dict[str, Any]:
+    """Compute a deterministic binding for a report so stale reports from a
+    prior attempt cannot satisfy a fresh attempt. The record is written
+    next to the report and is what consumers verify against."""
+    report_bytes = report_path.read_bytes() if report_path.is_file() else b""
+    binding = {
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "attempt_started_at": attempt_started_at,
+        "input_tree_sha": input_tree_sha,
+        "report_path": str(report_path),
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "report_bytes": len(report_bytes),
+    }
+    binding_path = report_path.with_suffix(report_path.suffix + ".binding.json")
+    lifecycle_atomic_write_json(binding_path, binding)
+    return binding
+
+
+def stale_report_check(
+    *,
+    report_path: Path,
+    attempt_id: str,
+    input_tree_sha: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Return (is_stale, binding). A report is stale when its binding is
+    missing or when it was produced for a different attempt/tree. Callers
+    MUST drop stale reports instead of letting them satisfy the new
+    attempt."""
+    binding_path = report_path.with_suffix(report_path.suffix + ".binding.json")
+    if not binding_path.is_file():
+        return True, None
+    try:
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True, None
+    if binding.get("attempt_id") != attempt_id:
+        return True, binding
+    if binding.get("input_tree_sha") != input_tree_sha:
+        return True, binding
+    if not report_path.is_file():
+        return True, binding
+    actual_sha = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    if binding.get("report_sha256") != actual_sha:
+        return True, binding
+    return False, binding
 
 
 class ProcessTree:
@@ -5555,7 +6198,6 @@ class PersistentHudServer:
                 if path.startswith("/api/open-folder"):
                     query = urllib.parse.urlparse(path).query
                     params = urllib.parse.parse_qs(query)
-                    name = (params.get("artifact") or [""])[0]
                     run_id = (params.get("run") or [""])[0]
                     artifact_root_dir = (state_dir / "artifacts").resolve()
                     target = artifact_root_dir / "deliverables"
@@ -8606,8 +9248,16 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
 
 
 class Verifier:
-    async def verify(self, task: TaskSpec, taskdir: Path) -> VerifyResult:
-        check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir)
+    async def verify(
+        self,
+        task: TaskSpec,
+        taskdir: Path,
+        *,
+        variables: dict[str, str] | None = None,
+    ) -> VerifyResult:
+        check_returncode, check_timed_out, output = await self._run_check(
+            task.check, taskdir, variables=variables or {}
+        )
         missing_files = tuple(
             rel for rel in task.expect_files if not self._is_nonempty_file(self._expect_file_path(taskdir, rel))
         )
@@ -8645,9 +9295,60 @@ class Verifier:
         return candidate if candidate.is_absolute() else taskdir / candidate
 
     @staticmethod
-    async def _run_check(command: str, cwd: Path) -> tuple[int | None, bool, str]:
+    async def _run_check(
+        check: Any,
+        cwd: Path,
+        *,
+        variables: dict[str, str] | None = None,
+    ) -> tuple[int | None, bool, str]:
+        """Run either the shell-mode check string or a structured argv
+        check. Variables are substituted before execution. Shell mode keeps
+        the existing /bin/sh -c behavior; argv mode joins with shlex so
+        `${{ github.sha }}` source text and absolute paths survive intact."""
+        resolved_variables = variables or {}
+        try:
+            shell_command, argv = normalize_check(check, resolved_variables)
+        except LifecycleError as exc:
+            return 2, False, f"[ringer.py] lifecycle: invalid check: {exc}\n"
+        if argv is not None:
+            return await Verifier._run_argv_check(argv, cwd)
+        return await Verifier._run_shell_check(shell_command, cwd)
+
+    @staticmethod
+    async def _run_shell_check(command: str, cwd: Path) -> tuple[int | None, bool, str]:
         proc = await asyncio.create_subprocess_shell(
             command,
+            cwd=str(cwd),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=CHECK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            timed_out = True
+            terminate_process_group(proc)
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                kill_process_group(proc)
+                stdout, _ = await proc.communicate()
+        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+        if timed_out:
+            output += f"\n[ringer.py] check timed out after {CHECK_TIMEOUT_S}s\n"
+        return proc.returncode, timed_out, output
+
+    @staticmethod
+    async def _run_argv_check(argv: tuple[str, ...], cwd: Path) -> tuple[int | None, bool, str]:
+        """Run a structured argv check without going through a shell. The
+        argv already went through shlex.join for display and lifecycle
+        path substitution, so dollar expressions in the source text are
+        preserved as literal arguments instead of being expanded by /bin/sh.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             cwd=str(cwd),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -8780,13 +9481,52 @@ class RingerRunner:
                     runtime.attempts = attempt
                     runtime.status = "retrying" if retrying else "running"
                 attempt_started = time.monotonic()
+                attempt_started_at = datetime.now(timezone.utc).isoformat()
+                attempt_id = f"{self.run_id}-a{attempt:03d}"
+                # Compute canonical runtime values and input tree SHA once
+                # per attempt. The verifier, the report binder, and the
+                # sealing step all consume the same variables so a stale
+                # report from a previous attempt cannot satisfy this one.
+                variables = lifecycle_canonical_values(
+                    run_dir=self.manifest.workdir,
+                    task_dir=runtime.taskdir,
+                    artifact_dir=self._lifecycle_attempt_artifact_dir(runtime, attempt_id),
+                    source_repo=self.manifest.repo,
+                    attempt=attempt,
+                )
+                with self.lock:
+                    runtime.lifecycle_variables = dict(variables)
+                input_tree_sha = self._lifecycle_input_tree_sha()
+                attempt_dir = self._lifecycle_attempt_artifact_dir(runtime, attempt_id)
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                self._lifecycle_persist_attempt_record(
+                    runtime,
+                    attempt_id=attempt_id,
+                    attempt_started_at=attempt_started_at,
+                    input_tree_sha=input_tree_sha,
+                    attempt_dir=attempt_dir,
+                    variables=variables,
+                )
+                if not self._lifecycle_prepare_reports_for_attempt(
+                    runtime,
+                    attempt_id=attempt_id,
+                    attempt_dir=attempt_dir,
+                ):
+                    with self.lock:
+                        runtime.status = "fail"
+                        runtime.final_verdict = "ERROR"
+                        runtime.failure_class = "STALE_ARTIFACT"
+                        runtime.ended_at_monotonic = time.monotonic()
+                    return
                 worker = await self._run_worker(runtime, current_spec, attempt)
                 with self.lock:
                     runtime.worker_pid = None
                     runtime.status = "verifying"
                     if worker.tokens is not None:
                         runtime.tokens = (runtime.tokens or 0) + worker.tokens
-                verify = await self.verifier.verify(runtime.task, runtime.taskdir)
+                verify = await self.verifier.verify(
+                    runtime.task, runtime.taskdir, variables=variables
+                )
                 verdict = verdict_for(worker, verify)
                 with self.lock:
                     runtime.last_check_returncode = verify.check_returncode
@@ -8794,13 +9534,25 @@ class RingerRunner:
                     runtime.last_check_output = verify.raw_output_excerpt
                 duration_ms = int((time.monotonic() - attempt_started) * 1000)
                 self._log_attempt(runtime, current_spec, retrying, worker, verify, verdict, duration_ms)
+                self._classify_failure_for_runtime(runtime, worker, verify)
+                reports_fresh = self._lifecycle_bind_reports_for_attempt(
+                    runtime,
+                    attempt_id=attempt_id,
+                    attempt_started_at=attempt_started_at,
+                    input_tree_sha=input_tree_sha,
+                    attempt_dir=attempt_dir,
+                )
+                if not reports_fresh and verdict == "PASS":
+                    verdict = "FAIL"
+                    with self.lock:
+                        runtime.failure_class = "STALE_ARTIFACT"
                 if verdict == "PASS":
                     self._harvest_deliverables_on_pass(runtime)
+                    cleanup_ok = await self._cleanup_worktree_on_pass(runtime, attempt)
                     with self.lock:
-                        runtime.status = "pass"
-                        runtime.final_verdict = verdict
+                        runtime.status = "pass" if cleanup_ok else "fail"
+                        runtime.final_verdict = verdict if cleanup_ok else "ERROR"
                         runtime.ended_at_monotonic = time.monotonic()
-                    await self._cleanup_worktree_on_pass(runtime)
                     return
                 if attempt < max_attempts and verdict in {"FAIL", "TIMEOUT"}:
                     failure_context = build_failure_context(runtime.log_path, verify.raw_output_excerpt)
@@ -8882,26 +9634,68 @@ class RingerRunner:
         if self.manifest.worktrees and self.manifest.repo is not None:
             taskdir.parent.mkdir(parents=True, exist_ok=True)
             if taskdir.exists():
-                # Failed tasks keep their worktrees for post-mortems, so a
-                # re-run with the same run_name lands here. Name the exact
-                # command that unblocks it — the bare "already exists" cost a
-                # full diagnosis cycle in the field. A linked worktree has a
-                # .git *file*; only then is `git worktree remove` the right
-                # command, and it must be repo-qualified and quoted to be
-                # paste-safe from anywhere.
-                if (taskdir / ".git").is_file():
+                # Lifecycle invariant: only reconcile worktrees that are
+                # positively owned by this RingerRunner. Anything else —
+                # a stray checkout, an operator's sandbox, a previous
+                # Ringer install with no marker — must be refused so we
+                # never silently delete a directory we cannot account for.
+                owned = (taskdir / LIFECYCLE_OWNERSHIP_MARKER).is_file()
+                is_worktree = (taskdir / ".git").is_file()
+                if not is_worktree:
+                    return False, (
+                        f"taskdir already exists but is not a registered git "
+                        f"worktree: {taskdir} — move or delete it, then re-run"
+                    )
+                if not owned:
                     remove_cmd = (
                         f"git -C {shlex.quote(str(self.manifest.repo))} "
                         f"worktree remove --force {shlex.quote(str(taskdir))}"
                     )
                     return False, (
-                        f"worktree taskdir already exists (left by a previous "
-                        f"failed run?): {taskdir} — remove it with "
-                        f"`{remove_cmd}` and re-run"
+                        f"worktree taskdir already exists but is not owned "
+                        f"by Ringer (missing {LIFECYCLE_OWNERSHIP_MARKER}): "
+                        f"{taskdir} — remove it with `{remove_cmd}` and re-run"
                     )
-                return False, (
-                    f"taskdir already exists but is not a registered git "
-                    f"worktree: {taskdir} — move or delete it, then re-run"
+                # Owned stale worktree: preserve any dirty state as a
+                # durable patch outside the worktree before removing it.
+                # This is the lifecycle invariant — failed runs can keep
+                # their worktrees, but a fresh run never destroys evidence.
+                preserved = self._preserve_owned_stale_worktree(runtime)
+                if preserved is False:
+                    return False, (
+                        f"owned worktree had dirty changes but a durable "
+                        f"patch could not be exported: {taskdir} — refusing "
+                        f"to remove the worktree"
+                    )
+                remove = await asyncio.create_subprocess_exec(
+                    "git",
+                    "-C",
+                    str(self.manifest.repo),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(taskdir),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                remove_stdout, _ = await remove.communicate()
+                if remove.returncode != 0:
+                    message = remove_stdout.decode("utf-8", errors="replace")
+                    append_text(
+                        runtime.log_path,
+                        f"[ringer.py] git worktree remove failed:\n{message}\n",
+                    )
+                    return False, message.strip() or "git worktree remove failed"
+                await asyncio.create_subprocess_exec(
+                    "git",
+                    "-C",
+                    str(self.manifest.repo),
+                    "worktree",
+                    "prune",
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
                 )
             proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -8920,14 +9714,61 @@ class RingerRunner:
                 message = stdout.decode("utf-8", errors="replace")
                 append_text(runtime.log_path, f"[ringer.py] git worktree add failed:\n{message}\n")
                 return False, message.strip() or "git worktree add failed"
+            # Mark this worktree as owned by Ringer's lifecycle so a
+            # subsequent run can identify it (and recover it cleanly)
+            # instead of refusing.
+            try:
+                write_lifecycle_marker(
+                    taskdir,
+                    lifecycle_owned_marker_payload(
+                        task_key=runtime.task.key,
+                        source_repo=self.manifest.repo,
+                        attempt=runtime.attempts,
+                    ),
+                )
+            except OSError as exc:
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] lifecycle marker write failed: {exc}\n",
+                )
+                return False, f"lifecycle marker write failed: {exc}"
             return True, None
         taskdir.mkdir(parents=True, exist_ok=True)
         return True, None
 
-    async def _cleanup_worktree_on_pass(self, runtime: TaskRuntime) -> None:
+    async def _cleanup_worktree_on_pass(self, runtime: TaskRuntime, attempt: int) -> bool:
         if not (self.manifest.worktrees and self.manifest.repo is not None):
-            return
+            return True
+        # Snapshotting is part of the sealing contract: reports and
+        # patches both flow outside the worktree so the cleanup cannot
+        # strand evidence behind `git worktree remove`.
         self._snapshot_worktree_reports(runtime)
+        patch_dir = self._lifecycle_task_artifacts_dir(runtime)
+        # Capture the dirty set BEFORE sealing. If sealing succeeds, the
+        # patch represents exactly those paths; the worktree is then
+        # safe to remove. If sealing fails, the retain path below handles
+        # the worktree.
+        sealed = self._seal_worktree_atomically(
+            runtime=runtime,
+            attempt=attempt,
+            patch_dir=patch_dir,
+        )
+        if not sealed:
+            # Fail-closed: a successful check on a disposable worktree
+            # without a sealed durable patch is not a successful lifecycle
+            # outcome. Retain the worktree and report MISSING_EXPORT.
+            with self.lock:
+                runtime.worktree_retained = True
+                runtime.failure_class = "MISSING_EXPORT"
+            append_text(
+                runtime.log_path,
+                "[ringer.py] lifecycle: sealing failed; worktree retained "
+                "for recovery — see MISSING_EXPORT in failure class\n",
+            )
+            return False
+        # Sealing succeeded: every dirty path is now durably captured in
+        # patch_path + sha256-verified metadata. Conservative cleanup
+        # removes the worktree; the patch + meta carry the evidence.
         proc = await asyncio.create_subprocess_exec(
             "git",
             "-C",
@@ -8944,6 +9785,14 @@ class RingerRunner:
         if proc.returncode != 0:
             message = stdout.decode("utf-8", errors="replace")
             append_text(runtime.log_path, f"[ringer.py] git worktree remove failed:\n{message}\n")
+            with self.lock:
+                runtime.worktree_retained = True
+                runtime.failure_class = "MISSING_EXPORT"
+            return False
+        with self.lock:
+            runtime.worktree_sealed = True
+            runtime.worktree_retained = False
+        return True
 
     def _snapshot_worktree_reports(self, runtime: TaskRuntime) -> None:
         copied: dict[str, Path] = {}
@@ -8967,12 +9816,294 @@ class RingerRunner:
             with self.lock:
                 runtime.report_paths.update(copied)
 
+    # ------------------------------------------------------------------
+    # Lifecycle helpers (PR #13 integration). These exist as instance
+    # methods so the invariant is enforced by RingerRunner.run itself;
+    # tools/ringer_lifecycle.py is a thin CLI wrapper that calls the
+    # same module-level helpers in this file.
+    # ------------------------------------------------------------------
+
+    def _lifecycle_task_artifacts_dir(self, runtime: TaskRuntime) -> Path:
+        """Durable artifacts live outside the worktree. For a manifest
+        configured with `worktrees = true` this is
+        `<workdir>/artifacts/<task_key>` so the patch + metadata survive
+        `git worktree remove`. Non-worktree tasks already live under the
+        workdir, so the taskdir itself acts as the artifact root."""
+        if self.manifest.worktrees and self.manifest.repo is not None:
+            return (self.manifest.workdir / "artifacts" / runtime.task.key).resolve()
+        return runtime.taskdir
+
+    def _lifecycle_attempt_artifact_dir(self, runtime: TaskRuntime, attempt_id: str) -> Path:
+        return self._lifecycle_task_artifacts_dir(runtime) / attempt_id
+
+    def _lifecycle_input_tree_sha(self) -> str:
+        repo = self.manifest.repo
+        if repo is None:
+            return ""
+        return lifecycle_repo_head(repo)
+
+    def _lifecycle_persist_attempt_record(
+        self,
+        runtime: TaskRuntime,
+        *,
+        attempt_id: str,
+        attempt_started_at: str,
+        input_tree_sha: str,
+        attempt_dir: Path,
+        variables: dict[str, str],
+    ) -> bool:
+        record = {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "task_key": runtime.task.key,
+            "attempt_id": attempt_id,
+            "attempt_started_at": attempt_started_at,
+            "input_tree_sha": input_tree_sha,
+            "source_repo": str(self.manifest.repo) if self.manifest.repo else "",
+            "variables": dict(variables),
+            "task_dir": str(runtime.taskdir),
+        }
+        try:
+            lifecycle_atomic_write_json(attempt_dir / "attempt.json", record)
+        except OSError as exc:
+            append_text(
+                runtime.log_path,
+                f"[ringer.py] lifecycle: attempt record write failed: {exc}\n",
+            )
+        with self.lock:
+            runtime.lifecycle_attempts.append(dict(record))
+
+    def _lifecycle_bind_reports_for_attempt(
+        self,
+        runtime: TaskRuntime,
+        *,
+        attempt_id: str,
+        attempt_started_at: str,
+        input_tree_sha: str,
+        attempt_dir: Path,
+    ) -> bool:
+        """Bind each report file in the taskdir to this attempt's identity.
+        A binding record carries the attempt ID, start time, input tree
+        SHA, and a SHA-256 of the report contents. Future attempts see
+        the binding and reject the report when it does not match."""
+        reports_fresh = True
+        for report_name in sorted(LIFECYCLE_REPORT_NAMES):
+            source = runtime.taskdir / report_name
+            if not source.is_file():
+                continue
+            binding_path = source.with_suffix(source.suffix + ".binding.json")
+            if not binding_path.is_file():
+                # A report written by this attempt has no prior binding yet;
+                # bind it immediately after verification so a fresh report
+                # is accepted while old reports were removed before worker
+                # execution.
+                bind_report_to_attempt(
+                    artifact_dir=attempt_dir,
+                    attempt_id=attempt_id,
+                    attempt_started_at=attempt_started_at,
+                    input_tree_sha=input_tree_sha,
+                    report_path=source,
+                )
+                try:
+                    shutil.copy2(source, attempt_dir / report_name)
+                except OSError as exc:
+                    append_text(
+                        runtime.log_path,
+                        f"[ringer.py] report copy into attempt dir failed "
+                        f"for {report_name}: {exc}\n",
+                    )
+                with self.lock:
+                    runtime.report_paths[report_name] = attempt_dir / report_name
+                continue
+            stale, binding = stale_report_check(
+                report_path=source,
+                attempt_id=attempt_id,
+                input_tree_sha=input_tree_sha,
+            )
+            if stale:
+                # Move the stale report out of the way so this attempt
+                # cannot satisfy the verdict with old evidence. The audit
+                # copy stays under the artifact root for traceability.
+                archive_dir = attempt_dir / "stale-reports"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                archive_path = archive_dir / f"{attempt_id}-{report_name}"
+                try:
+                    shutil.copy2(source, archive_path)
+                    source.unlink()
+                except OSError as exc:
+                    append_text(
+                        runtime.log_path,
+                        f"[ringer.py] lifecycle: stale report archive failed "
+                        f"for {report_name}: {exc}\n",
+                    )
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] lifecycle: rejected stale report "
+                    f"{report_name} (attempt {binding.get('attempt_id') if binding else 'unknown'} "
+                    f"!= current {attempt_id}); archived to {archive_path}\n",
+                )
+                with self.lock:
+                    runtime.failure_class = "STALE_ARTIFACT"
+                reports_fresh = False
+                continue
+            bind_report_to_attempt(
+                artifact_dir=attempt_dir,
+                attempt_id=attempt_id,
+                attempt_started_at=attempt_started_at,
+                input_tree_sha=input_tree_sha,
+                report_path=source,
+            )
+            try:
+                shutil.copy2(source, attempt_dir / report_name)
+            except OSError as exc:
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] lifecycle: report copy into attempt dir "
+                    f"failed for {report_name}: {exc}\n",
+                )
+            with self.lock:
+                runtime.report_paths[report_name] = attempt_dir / report_name
+        return reports_fresh
+
+    def _lifecycle_prepare_reports_for_attempt(
+        self,
+        runtime: TaskRuntime,
+        *,
+        attempt_id: str,
+        attempt_dir: Path,
+    ) -> bool:
+        """Remove reports left by an earlier attempt before verification.
+
+        A verifier must never see old evidence. Keep an audit copy outside
+        the worktree, remove both the report and its binding, and fail closed
+        if either operation cannot be completed.
+        """
+        archive_dir = attempt_dir / "stale-reports"
+        for report_name in sorted(LIFECYCLE_REPORT_NAMES):
+            source = runtime.taskdir / report_name
+            binding = source.with_suffix(source.suffix + ".binding.json")
+            if not source.exists() and not binding.exists():
+                continue
+            try:
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                if source.is_file():
+                    shutil.copy2(source, archive_dir / f"{attempt_id}-{report_name}")
+                    source.unlink()
+                if binding.is_file():
+                    shutil.copy2(binding, archive_dir / f"{attempt_id}-{binding.name}")
+                    binding.unlink()
+            except OSError as exc:
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] lifecycle: could not rotate stale report "
+                    f"{report_name}: {exc}\n",
+                )
+                return False
+            append_text(
+                runtime.log_path,
+                f"[ringer.py] lifecycle: rotated prior report {report_name} "
+                f"before attempt {attempt_id}\n",
+            )
+        return True
+
+    def _classify_failure_for_runtime(
+        self,
+        runtime: TaskRuntime,
+        worker: WorkerResult,
+        verify: VerifyResult,
+    ) -> None:
+        pieces: list[str] = []
+        if worker.error:
+            pieces.append(worker.error)
+        pieces.append(verify.raw_output_excerpt)
+        text = "\n".join(pieces)
+        if runtime.setup_error:
+            text = f"{runtime.setup_error}\n{text}"
+        if (
+            not worker.error
+            and not worker.timed_out
+            and verify.ok
+            and verify.check_returncode == 0
+        ):
+            classification = None
+        else:
+            classification = classify_failure(text, returncode=verify.check_returncode)
+        with self.lock:
+            runtime.failure_class = classification
+
+    def _seal_worktree_atomically(
+        self,
+        *,
+        runtime: TaskRuntime,
+        attempt: int,
+        patch_dir: Path,
+    ) -> bool:
+        """Run the export/seal/verify dance for the worktree. Returns True
+        iff the patch was sealed and verified on disk. Returning False
+        keeps the worktree so the operator can recover without losing
+        changes."""
+        try:
+            meta = seal_worktree(
+                task_dir=runtime.taskdir,
+                worktree=runtime.taskdir,
+                attempt=attempt,
+                source_repo=self.manifest.repo,
+                patch_dir=patch_dir,
+            )
+        except LifecycleError as exc:
+            append_text(
+                runtime.log_path,
+                f"[ringer.py] lifecycle: sealing failed: {exc}\n",
+            )
+            return False
+        except OSError as exc:
+            append_text(
+                runtime.log_path,
+                f"[ringer.py] lifecycle: sealing OS error: {exc}\n",
+            )
+            return False
+        with self.lock:
+            runtime.patch_path = meta.get("patch_path")
+            runtime.patch_sha256 = meta.get("patch_sha256")
+            runtime.patch_meta = meta
+        return True
+
+    def _preserve_owned_stale_worktree(self, runtime: TaskRuntime) -> bool | None:
+        """Export a durable patch for a previously-owned worktree so the
+        next attempt can remove it without losing evidence. Returns None
+        when the worktree was clean, True when a patch was written, and
+        False when sealing failed (which must block the remove)."""
+        dirty = worktree_dirty_paths(runtime.taskdir)
+        committed = worktree_has_committed_changes(runtime.taskdir, self.manifest.repo)
+        if not dirty and not committed:
+            return None
+        patch_dir = self._lifecycle_task_artifacts_dir(runtime) / "recovery"
+        try:
+            export_worktree_patch(
+                runtime.taskdir,
+                patch_dir / "stale.patch",
+                source_repo=self.manifest.repo,
+            )
+        except (LifecycleError, OSError) as exc:
+            append_text(
+                runtime.log_path,
+                f"[ringer.py] lifecycle: stale-worktree preservation failed: {exc}\n",
+            )
+            return False
+        append_text(
+            runtime.log_path,
+            f"[ringer.py] lifecycle: preserved stale worktree changes "
+            f"({len(dirty)} dirty paths) at {patch_dir / 'stale.patch'}\n",
+        )
+        return True
+
     async def _record_prepare_error(self, runtime: TaskRuntime, error: str) -> None:
         with self.lock:
             runtime.attempts = 1
             runtime.status = "fail"
             runtime.final_verdict = "ERROR"
             runtime.setup_error = error
+            runtime.failure_class = classify_failure(error)
             runtime.ended_at_monotonic = time.monotonic()
         # The worker log is where every other surface (HUD activity,
         # log_tail, post-mortems) looks first — leave the reason there too.
@@ -10062,7 +11193,10 @@ def dry_run(
         else:
             print("    full_access: false")
         print(f"    expect_files: {list(task.expect_files)}")
-        print(f"    check: {task.check}")
+        if isinstance(task.check, str):
+            print(f"    check: {task.check}")
+        else:
+            print(f"    check: argv={task.check.get('argv')}")
         if engine is None:
             print("    command: ERROR unknown engine")
         elif task.full_access and not config.allow_full_access:
