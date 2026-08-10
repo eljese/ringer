@@ -112,7 +112,7 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `full_access` | Worker runs unsandboxed — required for workers that spawn their own sub-workers; must also be enabled in config |
 | `worktrees` (run-level) | Give each task an isolated git worktree of `repo` so parallel workers can't collide |
 
-> **Worktree footgun:** on PASS the task's worktree is removed — including anything written inside it. In worktrees mode, worker logs live outside task worktrees in `workdir/logs/`; have workers write deliverables outside the worktree too, or have your `check` copy artifacts out before it exits 0.
+> **Worktree footgun:** on PASS the task's worktree is removed — but only AFTER a durable patch covering every tracked and untracked change has been sealed outside the worktree (SHA-256 verified). If sealing fails, the worktree is retained and the run is marked `MISSING_EXPORT` so evidence cannot be silently lost. In worktrees mode, worker logs live outside task worktrees in `workdir/logs/`; have workers write deliverables outside the worktree too, or have your `check` copy artifacts out before it exits 0. See [Lifecycle invariants](#lifecycle-invariants) below.
 
 Not sure what your tasks even are yet? [`docs/interview-prompt.md`](docs/interview-prompt.md) is a prompt you paste into any chatbot; it interviews you about the job and hands back a brief your orchestrating agent can turn into a manifest. Ready-made skeletons for the patterns that work live in [`templates/`](templates/).
 
@@ -420,6 +420,75 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 2. **Sandbox mode is always explicit** — default sandboxes silently resolve to read-only in temp directories and block every artifact write.
 3. **Verification executes the artifact** — an agent's own "done" is not evidence. Exit codes are.
 4. **Raw output only** — logs and eval rows carry verbatim worker output, never a summary. Anything that needs judgment reads the raw data.
+
+## Lifecycle invariants
+
+`RingerRunner.run` enforces these in-process — they're not a separate
+helper, not a prompt reminder, not a wrapper script. The companion
+CLI at [`tools/ringer_lifecycle.py`](tools/ringer_lifecycle.py) is a
+thin orchestrator over the same vocabulary and exists for safety-
+oriented bulk runs.
+
+- **Owned-worktree reconciliation.** Before creating a task's worktree,
+  Ringer inspects any pre-existing directory at the task path. A
+  directory without a `.ringer-lifecycle.json` marker is refused —
+  Ringer will not quietly delete work it cannot account for. A
+  directory that *is* owned (marked) and dirty gets a binary-capable
+  patch exported to `<workdir>/artifacts/<task>/recovery/stale.patch`
+  before the worktree is removed and re-created.
+
+- **Attempt-scoped artifacts.** Each attempt gets its own directory
+  `<workdir>/artifacts/<task>/<run-id>-aNNN/` plus a top-level
+  `attempt-NNN.patch` and `attempt-NNN.meta.json`. An attempt record
+  binds the attempt ID, start time, source-repo HEAD SHA, and the
+  artifact directory to the inputs that produced them — stale reports
+  cannot satisfy a later attempt.
+
+- **Durable sealing before removal.** On a successful code-changing
+  task, Ringer exports a binary-capable patch (tracked plus untracked
+  files) outside the worktree, writes SHA-256-verified metadata
+  atomically, and only then runs `git worktree remove --force`. If
+  sealing raises `LifecycleError`, the worktree is retained and the
+  run is classified `MISSING_EXPORT` — the operator can recover the
+  evidence instead of guessing what was lost.
+
+- **Structured argv checks.** A task `check` may be a string (shell
+  mode, unchanged) or `{"argv": ["sh", "-c", "echo $0"]}` (structured
+  mode). Structured mode joins with `shlex` and runs through
+  `create_subprocess_exec` so literal `${{ github.sha }}` and other
+  dollar-prefixed source text survives verbatim instead of being
+  interpreted by `/bin/sh`. The verifier dispatches on the type.
+
+- **Canonical runtime paths.** The lifecycle substitutes the same
+  variables everywhere they appear:
+  `{{RUN_DIR}}`, `{{TASK_DIR}}` / `{{TASK_WORKTREE}}`,
+  `{{ARTIFACT_DIR}}`, `{{SOURCE_REPO}}`, `{{BASE_SHA}}`, `{{ATTEMPT}}`.
+  Unresolved placeholders fail closed.
+
+- **Failure classification.** Every run carries exactly one of:
+  `WORKER_FINDING`, `CHECK_FAILURE`, `PROVIDER_QUOTA`,
+  `PROVIDER_TIMEOUT`, `NETWORK_SANDBOX`, `STALE_WORKTREE`,
+  `STALE_ARTIFACT`, `MISSING_EXPORT`, `MANIFEST_PATH_ERROR`,
+  `SHELL_INTERPOLATION`, `COORDINATOR_ERROR`. The infrastructure
+  classes (quota / timeout / network / stale / path mismatch) never
+  count as substantive code findings — they have their own retry
+  budget and never block a sealed lifecycle outcome on their own.
+
+- **Focused review packets.** `tools/ringer_lifecycle.py
+  review-packet` builds a bounded review surface so independent
+  reviewers can spend their tokens on what's actually changed: tier 1
+  is the exact diff only; tier 2 adds changed-file context (≤64 KiB
+  each); tier 3 adds the repo's `AGENTS.md` and `README.md` (≤96 KiB
+  each). The whole packet is capped at a configurable byte budget.
+
+- **Conservative cleanup.** Cleanup never destroys dirty or unsealed
+  evidence. A `git worktree remove` only fires when sealing produced
+  a verified patch + metadata; otherwise the worktree is retained so
+  the operator can intervene.
+
+The companion recovery skill at
+[`plugins/ringer/skills/ringer-recovery/SKILL.md`](plugins/ringer/skills/ringer-recovery/SKILL.md)
+walks an operator through the failure classes and recovery actions.
 
 ## Contributors
 

@@ -37,11 +37,32 @@ For stale artifacts, create a fresh attempt directory. Evidence is valid only wh
 
 For missing exports, stop before deleting the worktree. Seal a durable patch, hash it, and verify the hash before cleanup. A successful worker with an unsealed disposable worktree is not a successful lifecycle outcome.
 
-For path mismatches, prefer the canonical variables `{{RUN_DIR}}`, `{{TASK_DIR}}`, `{{ARTIFACT_DIR}}`, `{{SOURCE_REPO}}`, `{{BASE_SHA}}`, and `{{ATTEMPT}}`. Durable outputs belong outside a disposable worktree.
+For path mismatches, prefer the canonical variables `{{RUN_DIR}}`, `{{TASK_DIR}}` (alias `{{TASK_WORKTREE}}`), `{{ARTIFACT_DIR}}`, `{{SOURCE_REPO}}`, `{{BASE_SHA}}`, and `{{ATTEMPT}}`. Durable outputs belong outside a disposable worktree.
 
-For shell interpolation, express checks as structured `{"argv": [...]}` when using `tools/ringer_lifecycle.py`; do not embed GitHub Actions expressions or other dollar-prefixed source text into an unquoted shell command.
+For shell interpolation, express checks as structured `{"argv": [...]}`; do not embed GitHub Actions expressions or other dollar-prefixed source text into an unquoted shell command. Structured argv runs through `create_subprocess_exec` after `shlex` joining, so `${{ github.sha }}` survives verbatim. Shell-mode strings are still supported — use them when you genuinely need shell features.
 
 For AGY/reviewer timeouts, preserve the exact tree and retry with a smaller review packet before changing reviewers. Use tier 1 exact diff first, tier 2 changed-file context only if needed, and tier 3 repository context only for genuinely cross-cutting findings.
+
+## Owned-worktree marker
+
+Lifecycle-owned worktrees carry a `.ringer-lifecycle.json` marker at the
+worktree root with `owner: ringer-lifecycle`, `task`, `source_repo`,
+and `attempt`. Ringer only reconciles directories that carry this
+marker — anything else (a stray checkout, an operator's sandbox) is
+refused and the run fails closed with `STALE_WORKTREE` or
+`MANIFEST_PATH_ERROR`. Never `rm -rf` an unknown directory at a
+task path; investigate before touching it.
+
+## Sealing and removal
+
+For a successful code-changing task, `RingerRunner._cleanup_worktree_on_pass`
+exports a binary-capable patch (tracked plus untracked files) outside
+the worktree at `<workdir>/artifacts/<task>/attempt-NNN.patch`, writes
+`attempt-NNN.meta.json` with the SHA-256, and verifies the hash on disk
+matches the metadata before running `git worktree remove --force`. If
+sealing raises `LifecycleError`, the worktree is retained and the run
+is classified `MISSING_EXPORT` — the operator can recover the evidence
+from the unsealed worktree instead of guessing what was lost.
 
 ## Lifecycle helper
 

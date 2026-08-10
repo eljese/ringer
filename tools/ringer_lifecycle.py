@@ -181,7 +181,7 @@ def ensure_owned_worktree(repo: Path, task_dir: Path, artifact_dir: Path, task_k
     task_dir.parent.mkdir(parents=True, exist_ok=True)
     if task_dir.exists():
         marker = task_dir / OWNERSHIP_MARKER
-        if not marker.exists() and not (task_dir / ".git").is_file():
+        if not marker.exists():
             raise LifecycleError(f"refusing to reconcile unowned existing directory: {task_dir}")
         if (task_dir / ".git").is_file():
             recovery = export_worktree_patch(task_dir, artifact_dir / "recovery.patch")
@@ -190,7 +190,9 @@ def ensure_owned_worktree(repo: Path, task_dir: Path, artifact_dir: Path, task_k
             git(repo, "worktree", "remove", "--force", str(task_dir), check=False)
             git(repo, "worktree", "prune", check=False)
         elif task_dir.exists():
-            shutil.rmtree(task_dir)
+            raise LifecycleError(
+                f"refusing to remove lifecycle-marked non-worktree directory: {task_dir}"
+            )
     result = git(repo, "worktree", "add", "--detach", str(task_dir), "HEAD", check=False)
     if result.returncode != 0:
         raise LifecycleError(f"git worktree add failed for {task_key}: {result.stdout.strip()}")
@@ -204,23 +206,62 @@ def dirty_paths(worktree: Path) -> list[str]:
     result = git(worktree, "status", "--porcelain=v1", "-z")
     entries = result.stdout.split("\0")
     paths: list[str] = []
+    rename_source = False
     for entry in entries:
         if not entry:
             continue
-        raw = entry[3:] if len(entry) >= 4 else entry
-        if " -> " in raw:
-            raw = raw.split(" -> ", 1)[1]
+        if rename_source:
+            raw = entry
+            rename_source = False
+        else:
+            raw = entry[3:] if len(entry) >= 4 else entry
+            status = entry[:2]
+            rename_source = "R" in status or "C" in status
+            if " -> " in raw:
+                raw = raw.split(" -> ", 1)[1]
         if raw and raw != OWNERSHIP_MARKER and raw != "worker.log":
             paths.append(raw)
     return sorted(set(paths))
 
 
-def export_worktree_patch(worktree: Path, target: Path) -> Path | None:
+def export_worktree_patch(
+    worktree: Path,
+    target: Path,
+    *,
+    source_repo: Path | None = None,
+) -> Path | None:
     changed = dirty_paths(worktree)
+    pieces: list[bytes] = []
+    base_sha = git(source_repo, "rev-parse", "HEAD", check=False).stdout.strip() if source_repo else ""
+    worktree_head = git(worktree, "rev-parse", "HEAD", check=False).stdout.strip()
+    if base_sha and worktree_head and base_sha != worktree_head:
+        committed = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--binary", f"{base_sha}..{worktree_head}", "--"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        if committed.returncode != 0:
+            raise LifecycleError(
+                "could not read committed worktree diff: "
+                + committed.stdout.decode("utf-8", errors="replace").strip()
+            )
+        changed.append(f"committed HEAD {worktree_head}")
+        if committed.stdout:
+            pieces.append(committed.stdout)
     if not changed:
         return None
-    pieces: list[str] = []
-    tracked = git(worktree, "diff", "--binary", "HEAD", "--", check=False)
+    tracked = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--binary", "HEAD", "--"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        raise LifecycleError(
+            "could not export tracked changes: "
+            + tracked.stdout.decode("utf-8", errors="replace").strip()
+        )
     if tracked.stdout:
         pieces.append(tracked.stdout)
     untracked = git(worktree, "ls-files", "--others", "--exclude-standard", "-z").stdout
@@ -228,22 +269,29 @@ def export_worktree_patch(worktree: Path, target: Path) -> Path | None:
         candidate = worktree / rel
         if not candidate.is_file():
             continue
-        diff = run(
+        diff = subprocess.run(
             ["git", "diff", "--binary", "--no-index", "--", "/dev/null", rel],
             cwd=worktree,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             check=False,
         )
         if diff.returncode not in (0, 1):
-            raise LifecycleError(f"could not export untracked file {rel}: {diff.stdout.strip()}")
+            raise LifecycleError(
+                f"could not export untracked file {rel}: "
+                f"{diff.stdout.decode('utf-8', errors='replace').strip()}"
+            )
         if diff.stdout:
             pieces.append(diff.stdout)
-    payload = "".join(pieces)
+    payload = b"".join(pieces)
     if not payload.strip():
         raise LifecycleError(
             f"worktree has changes but no durable patch could be generated: {', '.join(changed)}"
         )
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(payload, encoding="utf-8")
+    tmp = target.with_name(f".{target.name}.tmp")
+    tmp.write_bytes(payload)
+    os.replace(tmp, target)
     return target
 
 
@@ -346,7 +394,11 @@ def run_task(
             break
 
     if repo and status == "pass":
-        patch = export_worktree_patch(task_dir, artifact_dir / "worktree.patch")
+        patch = export_worktree_patch(
+            task_dir,
+            artifact_dir / "worktree.patch",
+            source_repo=repo,
+        )
         if dirty_paths(task_dir) and patch is None:
             status = "fail"
             last_class = "MISSING_EXPORT"
