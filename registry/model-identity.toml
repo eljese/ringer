@@ -10,7 +10,7 @@
 [engines.codex]
 harness = "Codex CLI"
 access = "OAuth plan"
-default_model_key = "gpt-5.5"
+default_model_key = "gpt-5.6-luna"
 
 [engines.codex.models."gpt-5.5"]
 display = "GPT-5.5"
@@ -98,3 +98,38 @@ lab = "Meta"
 confidence = "verified"
 source = "manifest model field; OpenRouter slug meta-llama/llama-3.3-70b-instruct:free"
 last_verified = 2026-07-10
+
+[engines.opencode.models."minimax-coding-plan/MiniMax-M3"]
+display = "MiniMax M3"
+lab = "MiniMax"
+access = "MiniMax Token Plan"
+confidence = "verified"
+source = "local OpenCode 1.18.11 `opencode models` output"
+last_verified = 2026-08-02
+
+[engines.opencode.models."deepseek/deepseek-v4-flash"]
+display = "DeepSeek V4 Flash"
+lab = "DeepSeek"
+access = "DeepSeek API"
+confidence = "verified"
+source = "local OpenCode 1.18.11 `opencode models` output"
+last_verified = 2026-08-02
+
+[engines.agy]
+harness = "Antigravity CLI"
+access = "Antigravity account"
+default_model_key = "gemini-3.6-flash-high"
+
+[engines.agy.models."gemini-3.6-flash-high"]
+display = "Gemini 3.6 Flash High"
+lab = "Google"
+confidence = "verified"
+source = "local agy 1.1.9 `agy models` output"
+last_verified = 2026-08-02
+
+[engines.agy.models."gemini-3.1-pro-high"]
+display = "Gemini 3.1 Pro High"
+lab = "Google"
+confidence = "verified"
+source = "local agy 1.1.9 `agy models` output"
+last_verified = 2026-08-02

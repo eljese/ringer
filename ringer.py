@@ -6956,11 +6956,12 @@ def load_model_identity_registry(path: Path | None = None) -> ModelIdentityRegis
             model_key = str(model_key_raw).strip()
             if not model_key:
                 continue
+            model_access = model_log_text(raw_model.get("access")) or access
             identities[(engine, model_key)] = ModelIdentity(
                 model_display=model_log_text(raw_model.get("display")) or model_key,
                 lab=model_log_text(raw_model.get("lab")) or "(unknown)",
                 harness=harness,
-                access=access,
+                access=model_access,
                 alias=bool(raw_model.get("alias", False)),
                 confidence=model_log_text(raw_model.get("confidence")),
                 source=model_log_text(raw_model.get("source")),
@@ -10238,24 +10239,46 @@ class RingerRunner:
                 runtime.worker_pid = proc.pid
             self.active_processes[proc.pid] = proc
             reader = asyncio.create_task(self._tee_stream(proc, log_fh, capture))
-            timed_out = False
             try:
-                await asyncio.wait_for(proc.wait(), timeout=runtime.task.timeout_s)
-            except asyncio.TimeoutError:
-                timed_out = True
+                try:
+                    timed_out = False
+                    await asyncio.wait_for(proc.wait(), timeout=runtime.task.timeout_s)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    terminate_process_group(proc)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        kill_process_group(proc)
+                        await proc.wait()
+                try:
+                    await asyncio.wait_for(reader, timeout=5)
+                except asyncio.TimeoutError:
+                    reader.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await reader
+            except asyncio.CancelledError:
+                # A shutdown signal cancels the runner while this worker may
+                # still be alive. Reuse the same process-group cleanup as the
+                # timeout path before joining the tee and closing log_fh.
                 terminate_process_group(proc)
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except asyncio.TimeoutError:
                     kill_process_group(proc)
                     await proc.wait()
-            try:
-                await asyncio.wait_for(reader, timeout=5)
-            except asyncio.TimeoutError:
-                reader.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                raise
+            finally:
+                # Shutdown can cancel this coroutine while the output tee is
+                # still blocked in proc.stdout.read(). Cancel and join it
+                # before AsyncFileCloser closes log_fh; otherwise the tee can
+                # race the close and emit a misleading "write to closed file"
+                # traceback after the real worker error.
+                if not reader.done():
+                    reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reader
-            self.active_processes.pop(proc.pid, None)
+                self.active_processes.pop(proc.pid, None)
         output_tail = capture.text()
         tokens = parse_token_count(output_tail, engine.token_regex)
         reported_model = parse_reported_model(output_tail, engine.model_report_regex)
