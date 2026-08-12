@@ -286,12 +286,12 @@ class RingerRunnerLifecycleTests(unittest.TestCase):
         target = self.root / "result.patch"
         patch = ringer.export_worktree_patch(self.taskdir, target)
         self.assertIsNone(patch)  # empty worktree -> nothing to export
+        (self.taskdir / "tracked.txt").write_text("before\n", encoding="utf-8")
+        _git(self.taskdir, "add", "tracked.txt")
+        _git(self.taskdir, "commit", "-qm", "base")
         (self.taskdir / "tracked.txt").write_text("after\n", encoding="utf-8")
         (self.taskdir / "untracked.txt").write_text("untracked\n", encoding="utf-8")
         (self.taskdir / "binary.bin").write_bytes(b"\x00\xff\x80binary\x00\n")
-        # git diff will treat tracked.txt as new only after add. Make it
-        # actually tracked so the diff has substance.
-        _git(self.taskdir, "add", "tracked.txt")
         patch = ringer.export_worktree_patch(self.taskdir, target)
         self.assertEqual(patch, target)
         text = target.read_text(encoding="utf-8")

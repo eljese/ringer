@@ -2511,8 +2511,31 @@ def export_worktree_patch(
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LifecycleError(f"could not read tracked diff: {exc}") from exc
+    if tracked.returncode == 0:
         if tracked.stdout:
             pieces.append(tracked.stdout)
+    elif not worktree_head:
+        # An initialized-but-uncommitted worker worktree has no HEAD. In
+        # that case the staged diff is the only tracked representation.
+        staged = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--binary", "--cached", "--"],
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=30,
+        )
+        if staged.returncode != 0:
+            raise LifecycleError(
+                f"could not read tracked diff: "
+                f"{staged.stderr.decode('utf-8', errors='replace').strip()}"
+            )
+        if staged.stdout:
+            pieces.append(staged.stdout)
+    else:
+        raise LifecycleError(
+            f"could not read tracked diff: "
+            f"{tracked.stderr.decode('utf-8', errors='replace').strip()}"
+        )
     try:
         untracked = subprocess.run(
             ["git", "-C", str(worktree), "ls-files", "--others", "--exclude-standard", "-z"],
