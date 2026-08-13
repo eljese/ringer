@@ -282,6 +282,8 @@ class RingerRunnerLifecycleTests(unittest.TestCase):
             ["git", "-C", str(self.taskdir), "init", "-q"],
             check=True,
         )
+        _git(self.taskdir, "config", "user.email", "ringer-tests@example.invalid")
+        _git(self.taskdir, "config", "user.name", "Ringer Tests")
         # The exported patch should round-trip both kinds of changes.
         target = self.root / "result.patch"
         patch = ringer.export_worktree_patch(self.taskdir, target)
