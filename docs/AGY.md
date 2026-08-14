@@ -16,7 +16,7 @@ block in `config.sample.toml` that runs `agy` as a Ringer worker.
 
 Copy `config.sample.toml` to `~/.config/ringer/config.toml` and uncomment the
 `[engines.agy]` block. Pick a `model_default` from your `agy models` output — the
-shipped default `gemini-3.6-flash-high` is verified against agy 1.1.9 (2026-08-02).
+shipped default `gemini-3.7-flash-high` is verified against agy 1.1.13 on 2026-08-14 (Linux).
 
 You can override the model per task via `"model": "..."` in the manifest.
 
@@ -35,12 +35,12 @@ flags break down as:
 - `--add-dir <dir>` (repeatable): scopes the agent's write tools to `<dir>`
   and treats it as the workspace anchor — files end up under `<dir>`.
   **This is what you want for Ringer file-creation tasks.**
-- `--project <id>`: a project-ID token in agy 1.1.9; does NOT pin
+- `--project <id>`: a project-ID token in agy 1.1.13; does NOT pin
   filesystem writes. Naming the bug: the issue body recommended
   `--project {taskdir}`, which agy accepted but treated as a project
   identifier, so writes still landed in `~/.gemini/antigravity-cli/scratch/`.
 
-> **Verified 2026-08-02 against agy 1.1.9 on Linux:**
+> **Verified 2026-08-14 against agy 1.1.13 on Linux:**
 > a one-task probe `agy --add-dir $td --sandbox --mode accept-edits -p
 > 'Create hello.txt in current working directory …'` writes `hello.txt`
 > to `$td/hello.txt` with the spec-derived content; nothing leaks to
@@ -136,7 +136,7 @@ workdir.
 
 ## Token accounting
 
-**`agy` 1.1.9 does not expose per-call token counts** on stdout, stderr,
+**`agy` 1.1.13 does not expose per-call token counts** on stdout, stderr,
 or in its `--log-file`. Verified by:
 
 - A pure `agy -p "..."` invocation: no token count in the response or in

@@ -118,11 +118,19 @@ last_verified = 2026-08-02
 [engines.agy]
 harness = "Antigravity CLI"
 access = "Antigravity account"
-default_model_key = "gemini-3.6-flash-high"
+default_model_key = "gemini-3.7-flash-high"
+
+[engines.agy.models."gemini-3.7-flash-high"]
+display = "Gemini 3.7 Flash High"
+lab = "Google"
+confidence = "verified"
+source = "local agy 1.1.13 `agy models` output"
+last_verified = 2026-08-14
 
 [engines.agy.models."gemini-3.6-flash-high"]
 display = "Gemini 3.6 Flash High"
 lab = "Google"
+# Kept so existing scoresheet rows still resolve.
 confidence = "verified"
 source = "local agy 1.1.9 `agy models` output"
 last_verified = 2026-08-02
@@ -130,6 +138,7 @@ last_verified = 2026-08-02
 [engines.agy.models."gemini-3.1-pro-high"]
 display = "Gemini 3.1 Pro High"
 lab = "Google"
+# Kept so existing scoresheet rows still resolve.
 confidence = "verified"
 source = "local agy 1.1.9 `agy models` output"
 last_verified = 2026-08-02
