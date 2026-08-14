@@ -16,6 +16,7 @@ CONFIG = ROOT / "config.sample.toml"
 REGISTRY = ROOT / "registry" / "model-identity.toml"
 README = ROOT / "README.md"
 AGY_DOCS = ROOT / "docs" / "AGY.md"
+SUPERVISOR_DOCS = ROOT / "docs" / "deterministic-supervisor.md"
 DEFAULT_MODEL = "gemini-3.7-flash-high"
 
 _AGY_START = re.compile(r"^#\s*\[engines\.agy\]\s*$")
@@ -153,6 +154,16 @@ class AgyConfigTests(unittest.TestCase):
         self.assertNotIn(
             "shipped default `gemini-3.6-flash-high`",
             AGY_DOCS.read_text(encoding="utf-8"),
+        )
+
+    def test_supervisor_example_uses_default_model(self) -> None:
+        self.assertIn(
+            f'"model": "{DEFAULT_MODEL}"',
+            SUPERVISOR_DOCS.read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            '"model": "gemini-3.6-flash-high"',
+            SUPERVISOR_DOCS.read_text(encoding="utf-8"),
         )
 
 

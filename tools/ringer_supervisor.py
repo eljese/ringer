@@ -19,8 +19,8 @@ checks without changing Ringer's manifest schema::
         "fallback_on": ["PROVIDER_TIMEOUT", "CHECK_FAILURE", "MISSING_EXPORT"],
         "routes": [
           {"engine": "opencode", "model": "minimax-coding-plan/MiniMax-M3"},
-          {"engine": "grok", "model": "grok-build"},
-          {"engine": "agy", "model": "gemini-3.6-flash-high"}
+          {"engine": "grok", "model": "grok-4.6"},
+          {"engine": "agy", "model": "gemini-3.7-flash-high"}
         ],
         "provider_probes": {
           "grok": {"argv": ["grok", "--version"], "timeout_seconds": 60}
