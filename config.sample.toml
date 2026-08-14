@@ -96,36 +96,35 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # (or: npm install -g @xai-official/grok), then `grok login` — OAuth on a
 # SuperGrok or X Premium Plus plan. Headless mode (-p) runs a full agentic
 # loop with tools and exits. Grok brings its own OS sandbox (Seatbelt on
-# macOS): profile "workspace" = read everywhere, write CWD + temp + ~/.grok,
-# network allowed. Models: grok-build, grok-composer-2.5-fast (route with the
-# per-task "model" field). Verified against Grok Build v0.2.81 (2026-07-06).
-# Note: --no-auto-update is accepted but absent from --help in v0.2.81 (grok
-# rejects unknown flags, so this is a hidden flag, not a typo) — it stops the
-# CLI self-updating mid-swarm.
+# macOS, equivalent on Linux). Sandbox profiles: workspace (default floor)
+# = read everywhere, write CWD + temp + ~/.grok, network allowed; off for
+# full_access. Models: grok-4.6 (default), grok-4.5. Legacy slugs grok-build
+# / grok-composer-2.5-fast are rejected by 1.0.3. Verified against grok
+# 1.0.3 (2026-08-14, Linux). JSON now includes usage.total_tokens (verified
+# 2026-08-14). modelUsage key is grok-4.6-build when -m grok-4.6.
+# --no-auto-update is documented in 1.0.3 (no longer a hidden flag) — it
+# stops the CLI self-updating mid-swarm.
 # Uncomment to enable.
 # [engines.grok]
 # bin = "grok"
-# model_default = "grok-composer-2.5-fast"
+# model_default = "grok-4.6"
 # args_template = [
-#   "--cwd",
-#   "{taskdir}",
+#   "--cwd", "{taskdir}",
 #   "{access_args}",
-#   "-m",
-#   "{model}",
+#   "-m", "{model}",
 #   "--always-approve",
 #   "--no-auto-update",
-#   "--output-format",
-#   "json",
+#   "--output-format", "json",
 #   "{engine_args}",
-#   "-p",
-#   "{spec}",
+#   "-p", "{spec}",
 # ]
 # sandbox_args = ["--sandbox", "workspace"]
-# full_access_args = ["--sandbox", "off", "--permission-mode", "bypassPermissions"]
-# Grok's JSON output carries no usage/token fields (verified v0.2.81) — plan
-# CLIs report cost as "included in plan"; regex is a harmless no-match. Its JSON
-# also does not self-report a model, so no model_report_regex is configured.
+# full_access_args = ["--sandbox", "off"]
 # token_regex = "\"total_tokens\"\\s*:\\s*([0-9]+)"
+# Do not set model_report_regex. JSON modelUsage keys grok-4.6-build
+# when -m grok-4.6; that key is not a live `grok models` id. Stamping
+# it would split the scoreboard from grok-4.6. Keep the manifest/config
+# slug. grok-4.6-build remains a registry alias for any historical row.
 
 # Antigravity CLI (`agy`) — Google Antigravity headless CLI. Install with
 # `agy` once available on your PATH, then run `agy` interactively to

@@ -43,21 +43,47 @@ last_verified = 2026-07-10
 [engines.grok]
 harness = "Grok Build CLI"
 access = "OAuth plan"
-default_model_key = "grok-build"
+default_model_key = "grok-4.6"
+
+[engines.grok.models."grok-4.6"]
+display = "Grok 4.6"
+lab = "xAI"
+confidence = "verified"
+source = "local grok 1.0.3 `grok models`"
+last_verified = 2026-08-14
+
+[engines.grok.models."grok-4.6-build"]
+# Harness JSON self-report: --output-format json emits modelUsage key
+# grok-4.6-build when the invoked slug is grok-4.6.
+display = "Grok 4.6"
+lab = "xAI"
+alias = true
+confidence = "verified"
+source = "local grok 1.0.3 `grok models`"
+last_verified = 2026-08-14
+
+[engines.grok.models."grok-4.5"]
+display = "Grok 4.5"
+lab = "xAI"
+confidence = "verified"
+source = "local grok 1.0.3 `grok models`"
+last_verified = 2026-08-14
+noncanonical_slugs = ["opencode:openrouter/x-ai/grok-4.5"]
 
 [engines.grok.models."grok-build"]
-# "Grok Build" is the HARNESS (the CLI product), never a model name. The CLI
-# serves exactly two models: Grok 4.5 (xAI) and Composer 2.5 (Cursor). The
-# 'grok-build' engine default resolves to Grok 4.5. An earlier entry here
-# wrongly recorded "Grok Build 0.1" as a model — do not reintroduce it.
+# Legacy CLI slug rejected by grok 1.0.3. Kept so historical scoresheet
+# rows still resolve. Display stays Grok 4.5 — "Grok Build" is the HARNESS,
+# never a model name. An earlier entry wrongly recorded "Grok Build 0.1"
+# as a model — do not reintroduce it.
 display = "Grok 4.5"
 lab = "xAI"
 confidence = "verified"     # operator-confirmed (Jon, 2026-07-10): Grok Build CLI serves Grok 4.5 + Composer 2.5
 source = "https://docs.x.ai/developers/release-notes"
 last_verified = 2026-07-10
-noncanonical_slugs = ["opencode:openrouter/x-ai/grok-4.5"]
 
 [engines.grok.models."grok-composer-2.5-fast"]
+# Historical: Composer 2.5 Fast via Grok Build CLI. grok 1.0.3 rejects
+# this slug.
 display = "Composer 2.5 Fast"
 lab = "Cursor (Anysphere)"
 confidence = "verified"     # Cursor (Anysphere) model, served through xAI's Grok Build CLI in our setup

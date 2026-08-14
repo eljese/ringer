@@ -1,0 +1,19 @@
+{
+  "run_name": "grok-smoke",
+  "workdir": "/tmp/ringer-grok-smoke",
+  "max_parallel": 1,
+  "worktrees": false,
+  "tasks": [
+    {
+      "key": "grok-file-create",
+      "engine": "grok",
+      "model": "grok-4.6",
+      "spec": "Create a file named grok-smoke.txt in the current working directory. The file must contain exactly this text: grok works with ringer. A single trailing newline is acceptable. Do not add any other characters.",
+      "expect_files": ["grok-smoke.txt"],
+      "check": "python3 -c \"from pathlib import Path; import sys; got=Path('grok-smoke.txt').read_text().rstrip(chr(10)); sys.exit(0 if got=='grok works with ringer' else 'content='+repr(got))\"",
+      "verified": "The check proves grok created grok-smoke.txt whose content is grok works with ringer after stripping at most trailing newlines. Run via engines/run-grok-smoke.sh to wipe the workdir first — otherwise a previous successful run can leave a stale grok-smoke.txt that masks a new failure.",
+      "task_type": "probe",
+      "timeout_s": 900
+    }
+  ]
+}

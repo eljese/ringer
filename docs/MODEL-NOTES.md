@@ -171,6 +171,32 @@ checks and raw logs support — no vibes, no worker self-reports.
   to k2.7.
 
 
+## grok-4.6 (Grok CLI engine, flat plan)
+
+- 2026-08-14 — grok 1.0.3 probe (Linux, logged in): headless stdin-closed
+  PASS (`grok --no-auto-update -p "Reply with exactly: grok-headless-ok"
+  < /dev/null` exits 0, stdout is `grok-headless-ok`); JSON
+  `usage.total_tokens` present (`--output-format json`, example
+  `total_tokens` 22757); file-write under `--cwd` + `--sandbox workspace`
+  exact (`grok-write-probe.txt` = `grok-write-ok`); legacy slugs
+  `grok-build` and `grok-composer-2.5-fast` rejected as unknown model
+  ids. `modelUsage` key is `grok-4.6-build` when `-m grok-4.6`.
+- 2026-08-14 — live `engines/run-grok-smoke.sh` (run_id
+  `grok-smoke-20260814T224824Z-p4030643`): PASS on attempt 2 in 33.8s,
+  111146 tokens under the then-shipped exact `printf '%s'` check.
+  Attempt 1 wrote `grok works with ringer\n`. The shipped check now
+  rstrip's trailing newlines so that first-try write would PASS.
+  Harness JSON `modelUsage` key was `grok-4.6-build`; the lane stamps
+  the manifest slug `grok-4.6`.
+
+## grok-4.5 (Grok CLI engine, flat plan)
+
+- 2026-08-14 — grok 1.0.3 `grok models` lists `grok-4.5` as a live id
+  (not the default). Not used for the headless or file-write probes
+  that day — those ran as `grok-4.6`. Canonical route is
+  `grok:grok-4.5`. The historical slug `grok-build` (which displayed as
+  Grok 4.5) is rejected by 1.0.3 as an unknown model id.
+
 ## grok-build (Grok CLI engine, flat plan)
 
 - 2026-07-10 — identity correction (Jon): the Grok Build CLI is a HARNESS
