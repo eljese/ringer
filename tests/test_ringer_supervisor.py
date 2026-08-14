@@ -84,7 +84,9 @@ class RingerSupervisorTests(unittest.TestCase):
 import json
 import pathlib
 import sys
-manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+args = sys.argv[1:]
+manifest_path = pathlib.Path(args[args.index("run") + 1])
+manifest = json.loads(manifest_path.read_text())
 task = manifest["tasks"][0]
 workdir = pathlib.Path(manifest["workdir"]) / task["key"]
 if task.get("engine") == "grok":
