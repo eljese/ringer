@@ -7,7 +7,7 @@
     {
       "key": "agy-file-create",
       "engine": "agy",
-      "model": "gemini-3.6-flash-high",
+      "model": "gemini-3.7-flash-high",
       "spec": "Create a file named agy-smoke.txt in the current working directory. The file must contain exactly this text and nothing else: agy works with ringer",
       "expect_files": ["agy-smoke.txt"],
       "check": "printf 'agy works with ringer' > expected.txt && diff -u expected.txt agy-smoke.txt",

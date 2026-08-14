@@ -129,11 +129,11 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 
 # Antigravity CLI (`agy`) — Google Antigravity headless CLI. Install with
 # `agy` once available on your PATH, then run `agy` interactively to
-# authenticate. Verified against agy 1.1.9 (2026-08-02) on Linux.
+# authenticate. Verified against agy 1.1.13 on 2026-08-14 (Linux).
 # Ringer closes stdin, so only `-p` / `--print` headless mode is suitable.
 # Verified agy -p exits cleanly with stdin closed.
 # `agy models` lists the available model keys; default below uses
-# "gemini-3.6-flash-high". Override per-task via the manifest "model"
+# "gemini-3.7-flash-high". Override per-task via the manifest "model"
 # field, or set model_default to another verified key.
 #
 # **Sandbox is the default and the only safe option.** `agy` is wired
@@ -145,10 +145,10 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # the bypass is impossible regardless of what the worker prompt says.
 # This matches the same belt-and-suspenders model the codex block uses.
 # Use `--add-dir {taskdir}` (NOT `--project {taskdir}`). `--project` is a
-# project-ID token in agy 1.1.9 and does NOT pin filesystem writes; the
+# project-ID token in agy 1.1.13 and does NOT pin filesystem writes; the
 # file lands in ~/.gemini/antigravity-cli/scratch/ regardless. `--add-dir`
 # scopes agy's write tools to {taskdir} and is the documented recipe.
-# Verified 2026-07-09 on Linux: a one-task `agy --add-dir $taskdir -p '...'
+# Verified 2026-08-14 on Linux: a one-task `agy --add-dir $taskdir -p '...'
 # write to current working directory'` puts the file at $taskdir/...
 # with no scratch leakage.
 #
@@ -161,7 +161,7 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # Uncomment to enable.
 # [engines.agy]
 # bin = "agy"
-# model_default = "gemini-3.6-flash-high"
+# model_default = "gemini-3.7-flash-high"
 # args_template = [
 #   "--add-dir",            # scopes writes to {taskdir}; not "--project"
 #   "{taskdir}",
@@ -177,7 +177,7 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # ]
 # sandbox_args = []
 # full_access_args = ["--dangerously-skip-permissions"]
-# Token output format for agy 1.1.9 not yet verified — leave disabled.
+# Token output format for agy 1.1.13 not yet verified — leave disabled.
 # token_regex = ""
 
 # Claude Code (Anthropic) — Anthropic's official headless CLI.
