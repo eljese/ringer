@@ -10,3 +10,5 @@ hud/dist/
 hud/gen/
 hud/icons/icon.iconset/
 *.log
+# Local Ringer run artifacts from other checkouts. Never publish.
+manifests/

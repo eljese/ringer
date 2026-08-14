@@ -394,7 +394,7 @@ class TomlEmitterTests(unittest.TestCase):
                 "github@openai-curated": {"enabled": False},
             },
             "projects": [
-                {"/home/eljese": {"trust_level": "trusted"}},
+                {"/tmp/example-home": {"trust_level": "trusted"}},
                 {"/tmp/foo": {"trust_level": "untrusted"}},
             ],
         }
