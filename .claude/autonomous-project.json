@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "defaultBranch": "main",
+  "mergeMethod": "squash",
+  "requiredChecks": [
+    "full suite (ubuntu-latest)"
+  ],
+  "commands": {
+    "test": [
+      "python3 -m unittest discover -s tests -v"
+    ]
+  },
+  "externalAgents": {
+    "codex": {
+      "enabled": false,
+      "review": {
+        "githubBot": "disabled"
+      }
+    }
+  }
+}
