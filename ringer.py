@@ -10761,6 +10761,7 @@ def print_steering_notes(manifest: Manifest, config: AppConfig) -> None:
 ENGINE_INSTALL_HINTS = {
     "claude": "install it with `npm install -g @anthropic-ai/claude-code`, then run `claude` interactively to authenticate",
     "codex": "install it with `npm install -g @openai/codex` (or `brew install --cask codex`), then run `codex login`",
+    "grok": "install it with `curl -fsSL https://x.ai/cli/install.sh | bash` (or `npm install -g @xai-official/grok`), then run `grok login`",
     "opencode": "install it with `curl -fsSL https://opencode.ai/install | bash`, then run `opencode auth login`",
 }
 

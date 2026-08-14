@@ -245,7 +245,7 @@ grok login
 # 3) In ~/.config/ringer/config.toml, uncomment [engines.grok]
 ```
 
-Route with per-task `"engine": "grok"` and pick the model with `"model": "grok-build"` or `"model": "grok-composer-2.5-fast"` (the shipped default — the speed pick). Grok brings its own OS sandbox on macOS (profile `workspace`: read everywhere, writes confined to the task dir, temp, and `~/.grok`), and its JSON output exposes no token counts — plan-billed workers report cost as included in plan.
+Route with per-task `"engine": "grok"` and pick the model with `"model": "grok-4.6"` (the shipped default) or `"model": "grok-4.5"`. Grok 1.0.3 brings its own OS sandbox (profile `workspace`: read everywhere, writes confined to the task dir, temp, and `~/.grok`). JSON output reports tokens via `usage.total_tokens`. The `modelUsage` key is `grok-4.6-build` when the invoked slug is `grok-4.6`; that key is not a live CLI id, so the lane stamps `grok-4.6` rather than parsing it. Legacy slugs `grok-build` and `grok-composer-2.5-fast` are rejected by 1.0.3.
 
 ### The agy lane
 

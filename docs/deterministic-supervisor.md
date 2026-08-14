@@ -62,12 +62,12 @@ present. It writes:
       },
       {
         "engine": "grok",
-        "model": "grok-build",
+        "model": "grok-4.6",
         "timeout_seconds": 900
       },
       {
         "engine": "agy",
-        "model": "gemini-3.6-flash-high",
+        "model": "gemini-3.7-flash-high",
         "timeout_seconds": 600
       }
     ],
