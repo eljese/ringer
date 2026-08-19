@@ -62,8 +62,23 @@ review.
 ./ringer.py run manifest.json --dry-run   # print the plan, spawn nothing
 ```
 
-Runs land in `~/.ringer/runs/`. Raw worker logs land in `<workdir>/logs/`.
-Full reference: `README.md`. Ready-made manifest skeletons: `templates/`.
+Runs land in `~/.ringer/runs/` unless `--runtime-root` / `RINGER_RUNTIME_ROOT`
+is set. Raw worker logs land in `<workdir>/logs/`. Full reference:
+`README.md`. Ready-made manifest skeletons: `templates/`. Isolated AGY
+review: `docs/runtime-isolation.md`.
+
+## AGY review from an outer sandbox
+
+Run AGY-backed Ringer tasks only through `bin/ringer-safe-run`.
+
+Never launch `agy` or `ringer.py` directly from the outer Codex sandbox.
+Never change `allow_full_access` to true to recover from HOME, XDG,
+socket, dashboard, artifact, or state-path failures.
+
+If the safe runner reports `NETWORK_SANDBOX`, `HOME_ISOLATION_FAILURE`,
+`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, or `PREFLIGHT_FAILURE`,
+stop and report the infrastructure failure. Do not retry by weakening
+permissions.
 Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
 prints the same findings as non-blocking warnings.
