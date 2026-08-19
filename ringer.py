@@ -1502,6 +1502,19 @@ def _config_path_from_argv(argv: list[str]) -> Path | None:
     return None
 
 
+def _runtime_root_from_argv(argv: list[str]) -> Path | None:
+    for index, value in enumerate(argv[1:]):
+        if value == "--runtime-root" and index + 2 < len(argv):
+            raw = argv[index + 2]
+            if raw and not raw.startswith("-"):
+                return Path(raw)
+        if value.startswith("--runtime-root="):
+            raw = value.split("=", 1)[1]
+            if raw and not raw.startswith("-"):
+                return Path(raw)
+    return None
+
+
 def _self_update_command_requested(argv: list[str]) -> bool:
     """Recognize the explicit command without mistaking an argument value for it."""
     skip_next = False
@@ -1509,10 +1522,10 @@ def _self_update_command_requested(argv: list[str]) -> bool:
         if skip_next:
             skip_next = False
             continue
-        if value == "--config":
+        if value in {"--config", "--runtime-root"}:
             skip_next = True
             continue
-        if value == "--no-self-update" or value.startswith("--config="):
+        if value == "--no-self-update" or value.startswith("--config=") or value.startswith("--runtime-root="):
             continue
         return value == "self-update"
     return False
@@ -1540,7 +1553,12 @@ def maybe_self_update(
     if _self_update_command_requested(argv):
         return SelfUpdateResult("skipped", reason="explicit self-update command")
     try:
-        resolved_config = config or AppConfig.load(_config_path_from_argv(argv))
+        resolved_config = config or AppConfig.load(
+            _config_path_from_argv(argv),
+            runtime_root=_runtime_root_from_argv(argv),
+        )
+    except RuntimeIsolationError:
+        return SelfUpdateResult("skipped", reason="runtime root unavailable")
     except Exception:
         return SelfUpdateResult("skipped", reason="config unavailable")
     if not resolved_config.update.auto:

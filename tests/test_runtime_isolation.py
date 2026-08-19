@@ -231,6 +231,53 @@ class RuntimeRootTests(IsolationTestCase):
         path = ringer.self_update_state_path(loaded.state_dir)
         self.assertTrue(ringer.path_is_contained(path, runtime.resolve()))
 
+    def test_startup_self_update_uses_runtime_root_from_argv(self) -> None:
+        config = self.root / "config.toml"
+        config.write_text(
+            "\n".join(
+                [
+                    "allow_full_access = false",
+                    "[update]",
+                    "auto = true",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        runtime = self.root / "rr"
+        home = self.root / "home"
+        home.mkdir()
+        os.environ["HOME"] = str(home)
+        os.environ.pop("RINGER_HOME", None)
+
+        def failing_git(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(["git"], 1, "", "fail")
+
+        result = ringer.maybe_self_update(
+            [
+                str(ROOT / "ringer.py"),
+                "--config",
+                str(config),
+                "--runtime-root",
+                str(runtime),
+                "lint",
+                "manifest.json",
+            ],
+            repo_dir=ROOT,
+            runner=failing_git,
+            execve=lambda *_args: None,
+            environ={
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"RINGER_NO_SELF_UPDATE", "RINGER_SELF_UPDATED"}
+            },
+        )
+        self.assertFalse((home / ".ringer" / "self-update.json").exists())
+        self.assertTrue(
+            (runtime.resolve() / "self-update.json").exists(),
+            msg=repr(result),
+        )
+
     def test_legacy_behavior_remains_when_runtime_root_is_unset(self) -> None:
         config = self.root / "config.toml"
         legacy = self.write_legacy_config(config)
