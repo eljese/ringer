@@ -145,6 +145,7 @@ if is_under "$RUNTIME" "$RINGER_ROOT"; then
 fi
 
 REAL_HOME="${HOME}"
+export RINGER_SAFE_REAL_HOME="$REAL_HOME"
 HOST_HOME="$RUNTIME/host-home"
 mkdir -p -- \
   "$HOST_HOME/.config" \

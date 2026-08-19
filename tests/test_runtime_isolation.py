@@ -610,6 +610,17 @@ class SafeManifestTests(IsolationTestCase):
             validator.validate_manifest(path)
         self.assertIn("--add-dir", caught.exception.message)
 
+    def test_safe_manifest_rejects_workdir_under_real_home(self) -> None:
+        os.environ["RINGER_SAFE_REAL_HOME"] = str(self.root / "real-home")
+        (self.root / "real-home").mkdir()
+        path = self.write_manifest(
+            "home-work.json",
+            self.base_manifest(workdir=str(self.root / "real-home" / "project")),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("real home", caught.exception.message)
+
     def test_safe_manifest_rejects_home_relative_expect_files(self) -> None:
         path = self.write_manifest(
             "home-abs.json",

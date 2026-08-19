@@ -31,7 +31,7 @@ args_template = [
   "{spec}",
 ]
 sandbox_args = []
-full_access_args = ["--dangerously-skip-permissions"]
+full_access_args = []
 token_regex = ""
 
 [engines.agy.env]

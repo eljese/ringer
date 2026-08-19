@@ -155,6 +155,12 @@ def inspect_check(task_key: str, check: Any) -> None:
                 f"task {task_key}: shell checks must start with test, [, or grep; "
                 "prefer a structured argv check"
             )
+        for token in check.split():
+            candidate = Path(token).expanduser()
+            if (token.startswith("~") or candidate.is_absolute()) and path_under_real_home(
+                candidate
+            ):
+                fail(f"task {task_key}: check path must not sit under the real home")
         return
     if isinstance(check, dict):
         extra = set(check) - {"argv"}
@@ -167,6 +173,15 @@ def inspect_check(task_key: str, check: Any) -> None:
         for pattern in DESTRUCTIVE_SHELL:
             if pattern.search(joined):
                 fail(f"task {task_key}: destructive argv check is forbidden")
+        exe = Path(str(argv[0])).name.lower()
+        if exe in {"bash", "sh", "dash", "zsh", "ksh"} and any(
+            item in {"-c", "-lc"} for item in argv[1:]
+        ):
+            fail(f"task {task_key}: shell -c checks are forbidden")
+        for item in argv:
+            candidate = Path(item).expanduser()
+            if candidate.is_absolute() and path_under_real_home(candidate):
+                fail(f"task {task_key}: check path must not sit under the real home")
         return
     fail(f"task {task_key}: check must be a string or an argv object")
 
@@ -189,16 +204,36 @@ def is_truthy_full_access(value: Any) -> bool:
     return value is True or value in (1, "1", "true", "True", "yes", "on")
 
 
+def real_home() -> Path:
+    raw = os.environ.get("RINGER_SAFE_REAL_HOME", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.home().resolve()
+
+
 def workdir_is_sensitive(workdir: Path) -> bool:
-    home = Path.home().resolve()
+    home = real_home()
     try:
         resolved = workdir.resolve()
     except OSError:
         resolved = workdir
-    if not (resolved == home or resolved.is_relative_to(home)):
+    if resolved == home:
+        return True
+    if not resolved.is_relative_to(home):
         return False
     parts = set(resolved.parts)
     return any(name in parts for name in SENSITIVE_HOME_DIRS)
+
+
+def path_under_real_home(path: Path) -> bool:
+    home = real_home()
+    try:
+        resolved = path.expanduser()
+        if resolved.exists():
+            resolved = resolved.resolve()
+    except OSError:
+        return False
+    return resolved == home or resolved.is_relative_to(home)
 
 
 def validate_manifest(path: Path) -> None:
@@ -236,6 +271,8 @@ def validate_manifest(path: Path) -> None:
         allowed_work = project_roots + runtime_roots + [Path("/tmp")]
         if not contained_in_any(workdir, allowed_work):
             fail("workdir is outside the configured project/runtime roots")
+    elif path_under_real_home(workdir):
+        fail("workdir under the real home requires RINGER_SAFE_PROJECT_ROOTS")
 
     max_parallel = data.get("max_parallel", 1)
     if isinstance(max_parallel, bool) or not isinstance(max_parallel, int):

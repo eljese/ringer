@@ -166,7 +166,7 @@ when that is set.
 | Variable | Purpose | Default |
 |---|---|---|
 | `RINGER_SAFE_MANIFEST_ROOTS` | Manifest allowlist | `<checkout>/templates:<checkout>/manifests` |
-| `RINGER_SAFE_PROJECT_ROOTS` | Manifest `repo` allowlist | empty (Ringer checkout itself is rejected) |
+| `RINGER_SAFE_PROJECT_ROOTS` | Manifest `repo` and real-home workdir allowlist | empty (Ringer checkout and the real home are rejected) |
 | `RINGER_SAFE_RUNTIME_ROOTS` | Absolute output allowlist | empty |
 | `RINGER_SAFE_ARTIFACT_ROOTS` | Absolute `expect_files` allowlist | same as runtime roots |
 | `RINGER_SAFE_ALLOWED_ENGINES` | Engine allowlist | `agy:mock` |
