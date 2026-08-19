@@ -41,7 +41,7 @@ from html import escape as html_escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 TOOL_NAME = "ringer"
@@ -106,6 +106,10 @@ LIFECYCLE_FAILURE_CLASSES = (
     "PROVIDER_QUOTA",
     "PROVIDER_TIMEOUT",
     "NETWORK_SANDBOX",
+    "HOME_ISOLATION_FAILURE",
+    "RUNTIME_PATH_ESCAPE",
+    "PREFLIGHT_FAILURE",
+    "MANIFEST_POLICY_FAILURE",
     "STALE_WORKTREE",
     "STALE_ARTIFACT",
     "MISSING_EXPORT",
@@ -121,10 +125,44 @@ LIFECYCLE_INFRASTRUCTURE_CLASSES = frozenset(
         "PROVIDER_QUOTA",
         "PROVIDER_TIMEOUT",
         "NETWORK_SANDBOX",
+        "HOME_ISOLATION_FAILURE",
+        "RUNTIME_PATH_ESCAPE",
+        "PREFLIGHT_FAILURE",
+        "MANIFEST_POLICY_FAILURE",
         "STALE_WORKTREE",
         "STALE_ARTIFACT",
         "MANIFEST_PATH_ERROR",
     }
+)
+NETWORK_SANDBOX_GUIDANCE = (
+    "AGY requires a local loopback socket.\n"
+    "Run through bin/ringer-safe-run.\n"
+    "Do not retry inside the outer Codex sandbox."
+)
+RUNTIME_ROOT_ENV = f"{ENV_VAR_PREFIX}_RUNTIME_ROOT"
+RUNTIME_LAYOUT_DIRS = ("runs", "artifacts", "logs", "tmp", "engine-homes", "work")
+HOME_LIKE_ENV_VARS = frozenset(
+    {
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "AGY_RINGER_SCRATCH_DIR",
+    }
+)
+ENGINE_ENV_PLACEHOLDERS = frozenset({"runtime_root", "run_id", "task_key", "taskdir"})
+ENGINE_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ENGINE_ENV_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+ENGINE_ENV_UNSAFE_RE = re.compile(r"`|\$\(|(?<!\{)\$")
+FORBIDDEN_WORKER_FLAGS = (
+    "--dangerously-skip-permissions",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--no-sandbox",
 )
 LIFECYCLE_OWNERSHIP_MARKER = ".ringer-lifecycle.json"
 LIFECYCLE_REPORT_NAMES = frozenset(
@@ -783,6 +821,9 @@ class EngineConfig:
     # its own "model" — this is what makes a harness engine (OpenCode) model
     # agnostic instead of hard-coding one model into the command line.
     model_default: str = ""
+    # Optional worker environment overlay. Values are templates expanded
+    # with {runtime_root}, {run_id}, {task_key}, {taskdir} — never a shell.
+    env: tuple[tuple[str, str], ...] = ()
 
     @property
     def process_name(self) -> str:
@@ -824,6 +865,10 @@ class ArtifactConfig:
 class SteeringConfig:
     dir: Path | None = None
     inject_candidates: bool = True
+    # Directory that contains ringer/YYYY-MM-DD.jsonl observation files.
+    # None means <dir>/observations. Isolation may relocate writes here
+    # when the configured steering dir would escape the runtime root.
+    observations_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1090,9 +1135,16 @@ class AppConfig:
     artifact: ArtifactConfig
     steering: SteeringConfig = field(default_factory=SteeringConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    runtime_root: Path | None = None
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "AppConfig":
+    def load(
+        cls,
+        path: Path | None = None,
+        *,
+        runtime_root: Path | str | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> "AppConfig":
         config_path = path or env_config_path() or default_config_path()
         explicit = path is not None or env_config_path() is not None
         data: dict[str, Any] = {}
@@ -1123,7 +1175,7 @@ class AppConfig:
             # Steering is optional and must never make the base config unusable,
             # including when its loader itself is replaced or extended later.
             steering_config = SteeringConfig()
-        return cls(
+        config = cls(
             path=config_path if config_path.exists() else None,
             identity_default=identity_default,
             state_dir=state_dir,
@@ -1136,7 +1188,12 @@ class AppConfig:
             artifact=artifact_config,
             steering=steering_config,
             update=update_config,
+            runtime_root=None,
         )
+        resolved_root = resolve_runtime_root(runtime_root, environ=environ, create=False)
+        if resolved_root is not None:
+            return apply_runtime_root(config, resolved_root)
+        return config
 
 
 def default_config_path() -> Path:
@@ -1531,6 +1588,540 @@ def as_string_tuple(value: Any, *, key: str) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+class RuntimeIsolationError(ValueError):
+    """Fail-closed isolation error with a stable classification token."""
+
+    def __init__(self, classification: str, message: str) -> None:
+        super().__init__(f"{classification}: {message}")
+        self.classification = classification
+        self.detail = message
+
+
+def path_is_contained(path: Path, root: Path) -> bool:
+    """True when resolved path is root or a descendant of root."""
+    try:
+        resolved = path.expanduser().resolve()
+        root_resolved = root.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return resolved == root_resolved or resolved.is_relative_to(root_resolved)
+
+
+def resolve_runtime_root(
+    cli_value: Path | str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    create: bool = False,
+) -> Path | None:
+    """CLI --runtime-root wins, then RINGER_RUNTIME_ROOT, else None."""
+    env = os.environ if environ is None else environ
+    raw: Path | str | None = None
+    if cli_value is not None and str(cli_value).strip():
+        raw = cli_value
+    else:
+        text = str(env.get(RUNTIME_ROOT_ENV, "")).strip()
+        if text:
+            raw = text
+    if raw is None:
+        return None
+    path = Path(str(raw)).expanduser()
+    if create:
+        return canonicalize_runtime_root(path)
+    if path.exists():
+        try:
+            return path.resolve()
+        except OSError as exc:
+            raise RuntimeIsolationError(
+                "PREFLIGHT_FAILURE",
+                f"runtime root cannot be resolved: {path}: {exc}",
+            ) from exc
+    return path if path.is_absolute() else (Path.cwd() / path)
+
+
+def logical_path(path: Path) -> Path:
+    """Resolve a path as far as existing parents allow."""
+    candidate = path.expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    if candidate.exists():
+        return candidate.resolve()
+    return candidate.parent.resolve() / candidate.name
+
+
+def canonicalize_runtime_root(path: Path | str) -> Path:
+    """Resolve, create, and write-probe a runtime root. Fail closed."""
+    target = Path(str(path)).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    intended = logical_path(target)
+    if intended == repo_root() or intended.is_relative_to(repo_root()):
+        raise RuntimeIsolationError(
+            "RUNTIME_PATH_ESCAPE",
+            f"runtime root {intended} is inside the Ringer source repository {repo_root()}",
+        )
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        resolved = target.resolve()
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"runtime root cannot be created: {target}: {exc}",
+        ) from exc
+    probe = resolved / ".ringer-runtime-write-probe"
+    try:
+        probe.write_text("ok\n", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"runtime root is not writable: {resolved}: {exc}",
+        ) from exc
+    return resolved
+
+
+def ensure_runtime_layout(root: Path) -> None:
+    for name in RUNTIME_LAYOUT_DIRS:
+        directory = root / name
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeIsolationError(
+                "PREFLIGHT_FAILURE",
+                f"cannot create runtime directory {directory}: {exc}",
+            ) from exc
+
+
+def artifact_template_is_contained(template: str, root: Path) -> bool:
+    text = str(template).replace("{run_id}", "_run").replace("{run_name}", "_name")
+    return path_is_contained(Path(text), root)
+
+
+def apply_runtime_root(config: AppConfig, runtime_root: Path | str) -> AppConfig:
+    """Make runtime_root authoritative for built-in Ringer outputs.
+
+    Policy: deterministic override. Legacy absolute paths that escape the
+    root (state_dir, eval JSONL, artifact templates, steering observation
+    writes) are rewritten under the root. Operator inputs such as the
+    config path, postgres env_file, steering profiles, engine bins, and
+    the task workdir are left alone.
+    """
+    root = canonicalize_runtime_root(runtime_root)
+    ensure_runtime_layout(root)
+    state_dir = config.state_dir if path_is_contained(config.state_dir, root) else root
+    jsonl_path = (
+        config.eval.jsonl_path
+        if path_is_contained(config.eval.jsonl_path, root)
+        else root / "runs.jsonl"
+    )
+    default_art = root / "artifacts"
+    out_template = (
+        config.artifact.out_template
+        if artifact_template_is_contained(config.artifact.out_template, root)
+        else str(default_art / "{run_id}.html")
+    )
+    report_template = (
+        config.artifact.report_template
+        if artifact_template_is_contained(config.artifact.report_template, root)
+        else str(default_art / "{run_id}-report.html")
+    )
+    index_out = (
+        config.artifact.index_out
+        if path_is_contained(config.artifact.index_out, root)
+        else default_art / "index.html"
+    )
+    observations_dir = config.steering.observations_dir
+    if config.steering.dir is not None:
+        default_obs = config.steering.dir / "observations"
+        if observations_dir is None:
+            observations_dir = default_obs
+        if not path_is_contained(observations_dir, root):
+            observations_dir = root / "steering" / "observations"
+    return dataclass_replace(
+        config,
+        runtime_root=root,
+        state_dir=state_dir,
+        allow_full_access=False,
+        eval=dataclass_replace(config.eval, jsonl_path=jsonl_path),
+        artifact=dataclass_replace(
+            config.artifact,
+            out_template=out_template,
+            report_template=report_template,
+            index_out=index_out,
+        ),
+        steering=dataclass_replace(config.steering, observations_dir=observations_dir),
+    )
+
+
+def load_engine_env(raw: Any, *, engine_name: str) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise ValueError(f"engines.{engine_name}.env must be a TOML table")
+    items: list[tuple[str, str]] = []
+    for key, value in raw.items():
+        name = str(key)
+        if not ENGINE_ENV_NAME_RE.fullmatch(name):
+            raise ValueError(
+                f"engines.{engine_name}.env: invalid variable name {name!r}"
+            )
+        if not isinstance(value, str):
+            raise ValueError(f"engines.{engine_name}.env.{name} must be a string")
+        items.append((name, value))
+    return tuple(items)
+
+
+def expand_engine_env_value(template: str, values: Mapping[str, str]) -> str:
+    if ENGINE_ENV_UNSAFE_RE.search(template):
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            "engine env templates cannot contain shell interpolation",
+        )
+    unknown: list[str] = []
+
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in ENGINE_ENV_PLACEHOLDERS:
+            unknown.append(name)
+            return match.group(0)
+        return values[name]
+
+    expanded = ENGINE_ENV_PLACEHOLDER_RE.sub(repl, template)
+    if unknown:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            "unknown engine env placeholders: " + ", ".join(sorted(set(unknown))),
+        )
+    return expanded
+
+
+def default_isolated_engine_env(
+    *,
+    engine_name: str,
+    runtime_root: Path,
+    run_id: str,
+    task_key: str,
+) -> tuple[tuple[str, str], ...]:
+    home = str(runtime_root / "engine-homes" / engine_name / run_id / task_key)
+    tmp = str(runtime_root / "tmp" / run_id / task_key)
+    return (
+        ("HOME", home),
+        ("XDG_CONFIG_HOME", f"{home}/.config"),
+        ("XDG_CACHE_HOME", f"{home}/.cache"),
+        ("XDG_STATE_HOME", f"{home}/.local/state"),
+        ("XDG_DATA_HOME", f"{home}/.local/share"),
+        ("TMPDIR", tmp),
+        ("AGY_RINGER_SCRATCH_DIR", f"{home}/.gemini/antigravity-cli/scratch"),
+    )
+
+
+def engine_env_placeholder_values(
+    *,
+    config: AppConfig,
+    run_id: str,
+    task_key: str,
+    taskdir: Path,
+) -> dict[str, str]:
+    root = config.runtime_root if config.runtime_root is not None else ringer_home()
+    return {
+        "runtime_root": str(root),
+        "run_id": run_id,
+        "task_key": task_key,
+        "taskdir": str(taskdir),
+    }
+
+
+def prepare_engine_env_directory(name: str, path: Path) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if name == "HOME":
+            for rel in (
+                ".config",
+                ".cache",
+                ".local/state",
+                ".local/share",
+                ".gemini/antigravity-cli/logs",
+                ".gemini/antigravity-cli/crash",
+                ".gemini/antigravity-cli/scratch",
+            ):
+                (path / rel).mkdir(parents=True, exist_ok=True)
+        probe = path / ".ringer-engine-env-write-probe"
+        probe.write_text("ok\n", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "HOME_ISOLATION_FAILURE",
+            f"cannot create engine {name} directory {path}: {exc}",
+        ) from exc
+    try:
+        return path.resolve()
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "HOME_ISOLATION_FAILURE",
+            f"cannot resolve engine {name} directory {path}: {exc}",
+        ) from exc
+
+
+def build_worker_env(
+    engine: EngineConfig,
+    *,
+    config: AppConfig,
+    run_id: str,
+    task_key: str,
+    taskdir: Path,
+    inherited: Mapping[str, str] | None = None,
+) -> dict[str, str] | None:
+    """Build the worker environment.
+
+    None means inherit the process environment unchanged (legacy). When
+    isolation is active, HOME/XDG/TMP are always overlaid so the real
+    operator HOME cannot leak. An engine env table, if present, is applied
+    on top of that overlay (or on top of the inherited env when isolation
+    is off).
+    """
+    isolation_active = config.runtime_root is not None
+    if not isolation_active and not engine.env:
+        return None
+    env = dict(inherited if inherited is not None else os.environ)
+    values = engine_env_placeholder_values(
+        config=config,
+        run_id=run_id,
+        task_key=task_key,
+        taskdir=taskdir,
+    )
+    overlay: list[tuple[str, str]] = []
+    if isolation_active:
+        overlay.extend(
+            default_isolated_engine_env(
+                engine_name=engine.name,
+                runtime_root=config.runtime_root,
+                run_id=run_id,
+                task_key=task_key,
+            )
+        )
+    overlay.extend(engine.env)
+    for name, template in overlay:
+        expanded = expand_engine_env_value(template, values)
+        if name in HOME_LIKE_ENV_VARS:
+            resolved = Path(expanded).expanduser()
+            if not resolved.is_absolute():
+                resolved = Path.cwd() / resolved
+            if isolation_active and not path_is_contained(resolved, config.runtime_root):
+                raise RuntimeIsolationError(
+                    "RUNTIME_PATH_ESCAPE",
+                    f"engine {engine.name} env {name}={resolved} escapes "
+                    f"runtime root {config.runtime_root}",
+                )
+            env[name] = str(prepare_engine_env_directory(name, resolved))
+        else:
+            env[name] = expanded
+    return env
+
+
+def collect_runtime_owned_paths(config: AppConfig) -> dict[str, Path]:
+    root = config.runtime_root
+    if root is None:
+        return {}
+    dummy_out = Path(
+        format_artifact_template(config.artifact.out_template, "_run", "_name")
+    )
+    dummy_report = Path(
+        format_artifact_template(config.artifact.report_template, "_run", "_name")
+    )
+    paths: dict[str, Path] = {
+        "runtime_root": root,
+        "state_dir": config.state_dir,
+        "eval_jsonl": config.eval.jsonl_path,
+        "artifact_out": dummy_out,
+        "artifact_report": dummy_report,
+        "artifact_index": config.artifact.index_out,
+        "active_runs": active_runs_path(runtime_root=root),
+        "hud_log": config.state_dir / "hud.log",
+        "self_update": self_update_state_path(config.state_dir),
+        "catalog": root / "openrouter-catalog.json",
+        "model_db": root / "ringer.db",
+        "tmp": root / "tmp",
+        "engine_homes": root / "engine-homes",
+        "work": root / "work",
+        "logs": root / "logs",
+        "runs": config.state_dir / "runs",
+        "artifacts": artifacts_dir(config.state_dir),
+    }
+    if config.steering.observations_dir is not None:
+        paths["steering_observations"] = config.steering.observations_dir
+    return paths
+
+
+def probe_loopback_socket() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "NETWORK_SANDBOX",
+            f"{NETWORK_SANDBOX_GUIDANCE}\n({exc})",
+        ) from exc
+    finally:
+        sock.close()
+
+
+def probe_agy_binary(engine: EngineConfig) -> None:
+    bin_path = engine.bin
+    found: str | None
+    if os.sep in bin_path:
+        candidate = Path(bin_path).expanduser()
+        found = str(candidate) if candidate.is_file() else None
+    else:
+        found = shutil.which(bin_path)
+    if not found:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"configured AGY executable not found: {bin_path}",
+        )
+    try:
+        completed = subprocess.run(
+            [found, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+            check=False,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"AGY executable could not be launched: {found}: {exc}",
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"AGY version probe timed out: {found}",
+        ) from exc
+    if completed.returncode != 0:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"AGY version probe failed (exit {completed.returncode})",
+        )
+
+
+def inspect_worker_command_flags(command: list[str]) -> None:
+    lowered = [part.lower() for part in command]
+    for flag in FORBIDDEN_WORKER_FLAGS:
+        if flag.lower() in lowered:
+            raise RuntimeIsolationError(
+                "MANIFEST_POLICY_FAILURE",
+                f"composed worker command contains forbidden flag {flag}",
+            )
+    for left, right in zip(command, command[1:]):
+        if left == "--sandbox" and right.lower() in {"off", "none", "disabled"}:
+            raise RuntimeIsolationError(
+                "MANIFEST_POLICY_FAILURE",
+                "composed worker command disables the sandbox",
+            )
+
+
+def isolation_preflight(
+    config: AppConfig,
+    *,
+    manifest: Manifest | None = None,
+    probe_agy: bool = True,
+    loopback_probe: Any = None,
+) -> dict[str, str]:
+    """Validate an isolated runtime before any paid model request."""
+    if config.runtime_root is None:
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            "isolation preflight requires an explicit runtime root",
+        )
+    root = canonicalize_runtime_root(config.runtime_root)
+    if path_is_contained(root, repo_root()):
+        raise RuntimeIsolationError(
+            "RUNTIME_PATH_ESCAPE",
+            f"runtime root {root} is inside the Ringer source repository {repo_root()}",
+        )
+    paths = collect_runtime_owned_paths(config)
+    escaped = [
+        f"{name}={path}"
+        for name, path in paths.items()
+        if not path_is_contained(path, root)
+    ]
+    if escaped:
+        raise RuntimeIsolationError(
+            "RUNTIME_PATH_ESCAPE",
+            "runtime-owned paths escape runtime root: " + "; ".join(escaped),
+        )
+    if not os.access(root, os.W_OK):
+        raise RuntimeIsolationError(
+            "PREFLIGHT_FAILURE",
+            f"runtime root is not writable: {root}",
+        )
+    if manifest is not None:
+        try:
+            workdir = manifest.workdir.expanduser()
+            workdir.mkdir(parents=True, exist_ok=True)
+            probe = workdir / ".ringer-taskdir-write-probe"
+            probe.write_text("ok\n", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise RuntimeIsolationError(
+                "PREFLIGHT_FAILURE",
+                f"task workdir is not writable: {manifest.workdir}: {exc}",
+            ) from exc
+        for task in manifest.tasks:
+            engine = config.engines.get(task.engine)
+            if engine is None:
+                continue
+            build_worker_env(
+                engine,
+                config=config,
+                run_id="_preflight",
+                task_key=task.key,
+                taskdir=(manifest.workdir / task.key),
+            )
+            command = build_worker_command(
+                engine,
+                taskdir=(manifest.workdir / task.key),
+                spec=task.spec,
+                full_access=task.full_access,
+                engine_args=task.engine_args,
+                model=task.model,
+            )
+            inspect_worker_command_flags(command)
+        used = {task.engine for task in manifest.tasks}
+        if probe_agy and "agy" in used:
+            engine = config.engines.get("agy")
+            if engine is None:
+                raise RuntimeIsolationError(
+                    "PREFLIGHT_FAILURE",
+                    "manifest requests agy but engines.agy is not configured",
+                )
+            probe_agy_binary(engine)
+    probe = loopback_probe or probe_loopback_socket
+    probe()
+    return {name: str(path) for name, path in paths.items()}
+
+
+def run_preflight_command(config: AppConfig, args: argparse.Namespace) -> int:
+    try:
+        if config.runtime_root is None:
+            raise RuntimeIsolationError(
+                "PREFLIGHT_FAILURE",
+                "preflight requires --runtime-root or RINGER_RUNTIME_ROOT",
+            )
+        manifest = None
+        if getattr(args, "manifest", None) is not None:
+            manifest = Manifest.from_path(args.manifest)
+        paths = isolation_preflight(config, manifest=manifest)
+    except RuntimeIsolationError as exc:
+        print(exc.classification)
+        print(exc.detail)
+        return 2
+    print("PREFLIGHT_OK")
+    for name, value in sorted(paths.items()):
+        print(f"{name}={value}")
+    return 0
+
+
 def built_in_codex_engine() -> EngineConfig:
     resolved = shutil.which(DEFAULT_ENGINE_NAME) or DEFAULT_ENGINE_NAME
     return EngineConfig(
@@ -1644,6 +2235,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
         model_default = str(
             section.get("model_default", base.model_default if base else "")
         ).strip()
+        env = load_engine_env(section.get("env"), engine_name=clean_name)
         engines[clean_name] = EngineConfig(
             name=clean_name,
             bin=bin_path,
@@ -1653,6 +2245,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             token_regex=token_regex,
             model_report_regex=model_report_regex,
             model_default=model_default,
+            env=env,
         )
     return engines
 
@@ -2276,6 +2869,14 @@ def classify_failure(text: str, *, returncode: int | None = None) -> str:
     worker error channels funnel through here so retry budgets and operator
     summaries speak the same vocabulary.
     """
+    if "HOME_ISOLATION_FAILURE" in text:
+        return "HOME_ISOLATION_FAILURE"
+    if "RUNTIME_PATH_ESCAPE" in text:
+        return "RUNTIME_PATH_ESCAPE"
+    if "MANIFEST_POLICY_FAILURE" in text:
+        return "MANIFEST_POLICY_FAILURE"
+    if "PREFLIGHT_FAILURE" in text:
+        return "PREFLIGHT_FAILURE"
     lower = text.lower()
     if any(token in lower for token in ("quota", "rate limit", "usage limit", "credits exhausted", "billing")):
         return "PROVIDER_QUOTA"
@@ -3172,8 +3773,16 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
-def ringer_home() -> Path:
-    value = os.environ.get(f"{ENV_VAR_PREFIX}_HOME")
+def ringer_home(
+    *,
+    runtime_root: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    env = os.environ if environ is None else environ
+    root = runtime_root if runtime_root is not None else resolve_runtime_root(environ=env, create=False)
+    if root is not None:
+        return root if root.is_absolute() else (Path.cwd() / root)
+    value = env.get(f"{ENV_VAR_PREFIX}_HOME")
     if value and value.strip():
         return Path(value).expanduser().resolve()
     return (Path.home() / STATE_DIR_NAME).resolve()
@@ -3769,8 +4378,8 @@ def print_model_explore(
         )
 
 
-def active_runs_path() -> Path:
-    return ringer_home() / "active-runs.json"
+def active_runs_path(*, runtime_root: Path | None = None) -> Path:
+    return ringer_home(runtime_root=runtime_root) / "active-runs.json"
 
 
 def pid_is_alive(pid: int) -> bool:
@@ -10240,19 +10849,40 @@ class RingerRunner:
         )
         capture = RollingBytes(max_bytes=1_000_000)
         try:
+            worker_env = build_worker_env(
+                engine,
+                config=self.config,
+                run_id=self.run_id,
+                task_key=runtime.task.key,
+                taskdir=runtime.taskdir,
+            )
+        except RuntimeIsolationError as exc:
+            return WorkerResult(
+                returncode=None,
+                timed_out=False,
+                tokens=None,
+                error=str(exc),
+            )
+        if worker_env is not None:
+            home = worker_env.get("HOME")
+            if home:
+                append_text(log_path, f"[ringer.py] worker HOME={home}\n")
+        try:
             log_fh = log_path.open("ab")
         except OSError as exc:
             return WorkerResult(returncode=None, timed_out=False, tokens=None, error=str(exc))
         async with AsyncFileCloser(log_fh):
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=str(runtime.taskdir),
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    start_new_session=True,
-                )
+                spawn_kwargs: dict[str, Any] = {
+                    "cwd": str(runtime.taskdir),
+                    "stdin": asyncio.subprocess.DEVNULL,
+                    "stdout": asyncio.subprocess.PIPE,
+                    "stderr": asyncio.subprocess.STDOUT,
+                    "start_new_session": True,
+                }
+                if worker_env is not None:
+                    spawn_kwargs["env"] = worker_env
+                proc = await asyncio.create_subprocess_exec(*cmd, **spawn_kwargs)
             except Exception as exc:
                 message = f"[ringer.py] worker spawn failed: {exc}\n"
                 log_fh.write(message.encode("utf-8", errors="replace"))
@@ -10460,12 +11090,10 @@ class RingerRunner:
                 "worker_tokens": worker.tokens,
                 "check_excerpt": verify.raw_output_excerpt[:500],
             }
-            path = (
-                steering_dir
-                / "observations"
-                / "ringer"
-                / f"{now.strftime('%Y-%m-%d')}.jsonl"
-            )
+            observations_dir = self.config.steering.observations_dir
+            if observations_dir is None:
+                observations_dir = steering_dir / "observations"
+            path = observations_dir / "ringer" / f"{now.strftime('%Y-%m-%d')}.jsonl"
             append_text(path, json.dumps(row, sort_keys=True) + "\n")
         except Exception as exc:
             with contextlib.suppress(Exception):
@@ -11054,10 +11682,14 @@ async def run_baseline(manifest: Manifest, *, config: AppConfig) -> int:
     scratch taskdir (a detached worktree when the manifest uses worktrees),
     removed afterwards, so no state leaks between checks or into a later run.
     """
-    del config  # engines are irrelevant: baseline spawns no workers
     verifier = Verifier()
     worktrees = manifest.worktrees and manifest.repo is not None
-    baseline_root = Path(tempfile.mkdtemp(prefix="ringer-baseline-"))
+    tmp_parent = None
+    runtime_root = getattr(config, "runtime_root", None)
+    if runtime_root is not None:
+        tmp_parent = str(runtime_root / "tmp")
+        Path(tmp_parent).mkdir(parents=True, exist_ok=True)
+    baseline_root = Path(tempfile.mkdtemp(prefix="ringer-baseline-", dir=tmp_parent))
     total = len(manifest.tasks)
     print(f"Baseline: executing {total} check(s) with no workers spawned.")
     failures = 0
@@ -11278,8 +11910,11 @@ def print_summary(run_id: str, runtimes: list[TaskRuntime]) -> None:
             print(f"  {runtime.task.key}: {runtime.setup_error}")
 
 
-def create_demo_manifest() -> Path:
-    root = Path(tempfile.mkdtemp(prefix="ringer-demo-"))
+def create_demo_manifest(*, parent: Path | None = None) -> Path:
+    tmp_dir = str(parent) if parent is not None else None
+    if tmp_dir is not None:
+        Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="ringer-demo-", dir=tmp_dir))
     workdir = root / "work"
     manifest = {
         "run_name": "ringer-demo",
@@ -11498,6 +12133,8 @@ def run_one_request(config: AppConfig, args: argparse.Namespace) -> int:
         redact=args.redact,
     )
     validate_manifest_engines(manifest, config)
+    if config.runtime_root is not None:
+        isolation_preflight(config, manifest=manifest)
     preflight_engine_bins(manifest, config)
     identity = resolve_identity(
         args.identity,
@@ -12489,9 +13126,15 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
         log_path = config.state_dir / "hud.log"
         with contextlib.suppress(Exception):
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            hud_cmd = [sys.executable, str(Path(__file__).resolve())]
+            if config.path is not None:
+                hud_cmd.extend(["--config", str(config.path)])
+            if config.runtime_root is not None:
+                hud_cmd.extend(["--runtime-root", str(config.runtime_root)])
+            hud_cmd.extend(["hud", "--no-open", "--port", str(port)])
             with log_path.open("ab") as log_file:
                 subprocess.Popen(
-                    [sys.executable, str(Path(__file__).resolve()), "hud", "--no-open", "--port", str(port)],
+                    hud_cmd,
                     stdout=log_file,
                     stderr=log_file,
                     stdin=subprocess.DEVNULL,
@@ -12552,6 +13195,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--config", type=Path, help="path to config.toml (default: XDG config path)")
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        help=(
+            "authoritative isolated runtime directory for state, artifacts, "
+            "eval logs, and engine HOME/XDG/TMP (overrides RINGER_RUNTIME_ROOT)"
+        ),
+    )
     parser.add_argument(
         "--no-self-update",
         action="store_true",
@@ -12699,6 +13350,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     lint_parser = subparsers.add_parser("lint", help="lint a ringer manifest")
+    preflight_parser = subparsers.add_parser(
+        "preflight",
+        help="validate an isolated runtime before spawning workers",
+    )
+    preflight_parser.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
+    preflight_parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="optional manifest to preflight engine bins, taskdir, and env templates",
+    )
+
     lint_parser.add_argument("manifest", type=Path, help="path to ringer.json")
     lint_parser.add_argument(
         "--allow-noncanonical-route",
@@ -12845,8 +13509,17 @@ def main(argv: list[str] | None = None) -> int:
     parse_argv = [value for value in invocation_argv[1:] if value != "--no-self-update"]
     args = parser.parse_args(parse_argv)
     try:
+        runtime_root = resolve_runtime_root(
+            getattr(args, "runtime_root", None),
+            create=False,
+        )
+        if runtime_root is not None:
+            canonical = canonicalize_runtime_root(runtime_root)
+            os.environ[RUNTIME_ROOT_ENV] = str(canonical)
+            runtime_root = canonical
+
         if args.command == "self-update":
-            config = AppConfig.load(args.config)
+            config = AppConfig.load(args.config, runtime_root=runtime_root)
             result = perform_self_update(
                 config=config,
                 argv=invocation_argv,
@@ -12901,7 +13574,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "catalog":
             return run_catalog_command(args)
 
-        config = AppConfig.load(args.config)
+        config = AppConfig.load(args.config, runtime_root=runtime_root)
+        if args.command == "preflight":
+            return run_preflight_command(config, args)
         if args.command == "db":
             return run_db_command(config, args)
         if args.command == "models":
@@ -12918,7 +13593,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_one_request(config, args)
 
         if args.command == "demo":
-            manifest_path = create_demo_manifest()
+            demo_parent = (
+                config.runtime_root / "tmp" if config.runtime_root is not None else None
+            )
+            manifest_path = create_demo_manifest(parent=demo_parent)
             print(f"Demo manifest: {manifest_path}")
         else:
             manifest_path = args.manifest
@@ -12957,6 +13635,8 @@ def main(argv: list[str] | None = None) -> int:
             # Deliberately before preflight_engine_bins: baseline spawns no
             # workers, so a missing engine binary must not block it.
             return asyncio.run(run_baseline(manifest, config=config))
+        if config.runtime_root is not None:
+            isolation_preflight(config, manifest=manifest)
         preflight_engine_bins(manifest, config)
         if args.command == "run":
             start_catalog_auto_refresh()
@@ -12974,6 +13654,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)
         return 130
+    except RuntimeIsolationError as exc:
+        print(exc.classification, file=sys.stderr)
+        print(exc.detail, file=sys.stderr)
+        return 2
     except Exception as exc:
         print(f"ringer.py: error: {exc}", file=sys.stderr)
         return 2
