@@ -192,8 +192,6 @@ copy_agy_subset() {
     fi
   done
 }
-copy_agy_subset
-
 export RINGER_RUNTIME_ROOT="$RUNTIME"
 export RINGER_HOME="$RUNTIME"
 export RINGER_NO_SELF_UPDATE=1
@@ -212,6 +210,8 @@ if [ "$status" -ne 0 ]; then
   echo "ringer-safe-run: validator failed; runtime preserved at $RUNTIME" >&2
   exit "$status"
 fi
+
+copy_agy_subset
 
 "$PYTHON_BIN" "$RINGER_ROOT/ringer.py" \
   --config "$CONFIG" \

@@ -301,9 +301,10 @@ def validate_manifest(path: Path) -> None:
                 fail(f"task {key}: expect_files must be a list")
             for item in expect_files:
                 text = str(item)
-                if text.startswith("/"):
+                candidate = Path(text).expanduser()
+                if candidate.is_absolute() or text.startswith("~"):
                     approved = artifact_roots + runtime_roots
-                    if not approved or not contained_in_any(Path(text), approved):
+                    if not approved or not contained_in_any(candidate, approved):
                         fail(f"task {key}: absolute output path is outside approved roots")
                 if ".." in Path(text).parts:
                     fail(f"task {key}: path traversal in expect_files")
