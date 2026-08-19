@@ -1809,7 +1809,10 @@ def default_isolated_engine_env(
         ("XDG_CACHE_HOME", f"{home}/.cache"),
         ("XDG_STATE_HOME", f"{home}/.local/state"),
         ("XDG_DATA_HOME", f"{home}/.local/share"),
+        ("XDG_RUNTIME_DIR", f"{home}/.run"),
         ("TMPDIR", tmp),
+        ("TEMP", tmp),
+        ("TMP", tmp),
         ("AGY_RINGER_SCRATCH_DIR", f"{home}/.gemini/antigravity-cli/scratch"),
     )
 
@@ -1839,6 +1842,7 @@ def prepare_engine_env_directory(name: str, path: Path) -> Path:
                 ".cache",
                 ".local/state",
                 ".local/share",
+                ".run",
                 ".gemini/antigravity-cli/logs",
                 ".gemini/antigravity-cli/crash",
                 ".gemini/antigravity-cli/scratch",
@@ -2012,12 +2016,25 @@ def inspect_worker_command_flags(command: list[str]) -> None:
                 "MANIFEST_POLICY_FAILURE",
                 f"composed worker command contains forbidden flag {flag}",
             )
+        if any(part.startswith(f"{flag.lower()}=") for part in lowered):
+            raise RuntimeIsolationError(
+                "MANIFEST_POLICY_FAILURE",
+                f"composed worker command contains forbidden flag {flag}",
+            )
     for left, right in zip(command, command[1:]):
         if left == "--sandbox" and right.lower() in {"off", "none", "disabled"}:
             raise RuntimeIsolationError(
                 "MANIFEST_POLICY_FAILURE",
                 "composed worker command disables the sandbox",
             )
+    for part in command:
+        if part.lower().startswith("--sandbox="):
+            value = part.split("=", 1)[1].lower()
+            if value in {"off", "none", "disabled"}:
+                raise RuntimeIsolationError(
+                    "MANIFEST_POLICY_FAILURE",
+                    "composed worker command disables the sandbox",
+                )
 
 
 def isolation_preflight(

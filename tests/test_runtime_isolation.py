@@ -488,7 +488,7 @@ class SafeManifestTests(IsolationTestCase):
                         "key": "review",
                         "engine": "agy",
                         "spec": "Review",
-                        "check": "true",
+                        "check": "test -f report.md",
                         "full_access": True,
                     }
                 ]
@@ -507,7 +507,7 @@ class SafeManifestTests(IsolationTestCase):
                         "key": "review",
                         "engine": "codex",
                         "spec": "Review",
-                        "check": "true",
+                        "check": "test -f report.md",
                     }
                 ]
             ),
@@ -535,7 +535,7 @@ class SafeManifestTests(IsolationTestCase):
                         "key": "../escape",
                         "engine": "agy",
                         "spec": "Review",
-                        "check": "true",
+                        "check": "test -f report.md",
                     }
                 ]
             ),
@@ -543,6 +543,44 @@ class SafeManifestTests(IsolationTestCase):
         with self.assertRaises(validator.PolicyError) as caught:
             validator.validate_manifest(path)
         self.assertIn("unsafe", caught.exception.message)
+
+    def test_safe_manifest_rejects_extra_add_dir(self) -> None:
+        path = self.write_manifest(
+            "add-dir.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "test -f report.md",
+                        "engine_args": ["--add-dir", "/"],
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("--add-dir", caught.exception.message)
+
+    def test_safe_manifest_rejects_absolute_expect_files(self) -> None:
+        path = self.write_manifest(
+            "abs.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "test -f report.md",
+                        "expect_files": ["/etc/passwd"],
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("absolute output path", caught.exception.message)
 
     def test_safe_manifest_rejects_destructive_shell_check(self) -> None:
         path = self.write_manifest(
@@ -726,7 +764,7 @@ class SafeRunWrapperTests(IsolationTestCase):
                             "key": "review",
                             "engine": "mock",
                             "spec": "no",
-                            "check": "true",
+                            "check": "test -f report.md",
                         }
                     ],
                 }

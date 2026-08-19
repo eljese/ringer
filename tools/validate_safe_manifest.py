@@ -26,9 +26,28 @@ DESTRUCTIVE_SHELL = (
     re.compile(r"\bsudo\b", re.I),
     re.compile(r"\bmkfs\b", re.I),
     re.compile(r"\bdd\s+if=", re.I),
-    re.compile(r"\bchmod\s+-R\s+777\b", re.I),
-    re.compile(r"curl[^\n]*\|\s*(ba)?sh", re.I),
-    re.compile(r"wget[^\n]*\|\s*(ba)?sh", re.I),
+    re.compile(r"\bchmod\b", re.I),
+    re.compile(r"\bchown\b", re.I),
+    re.compile(r"\bln\s+-s\b", re.I),
+    re.compile(r"curl[^\n]*\|", re.I),
+    re.compile(r"wget[^\n]*\|", re.I),
+    re.compile(r"\bpython(?:3)?\s+-c\b", re.I),
+    re.compile(r"\bperl\s+-e\b", re.I),
+    re.compile(r"\bruby\s+-e\b", re.I),
+)
+NOOP_SHELL = re.compile(r"^(true|:|exit\s+0)\s*$")
+CONSERVATIVE_SHELL = re.compile(
+    r"^(test|\[|grep|egrep|fgrep)\b",
+    re.I,
+)
+SENSITIVE_HOME_DIRS = (
+    ".ssh",
+    ".gnupg",
+    ".gemini",
+    ".codex",
+    ".claude",
+    ".aws",
+    ".config",
 )
 FORBIDDEN_FLAGS = (
     "--dangerously-skip-permissions",
@@ -126,9 +145,16 @@ def inspect_check(task_key: str, check: Any) -> None:
     if isinstance(check, str):
         if not check.strip():
             fail(f"task {task_key}: check is required")
+        if NOOP_SHELL.match(check.strip()):
+            fail(f"task {task_key}: no-op shell check is forbidden")
         for pattern in DESTRUCTIVE_SHELL:
             if pattern.search(check):
                 fail(f"task {task_key}: destructive shell check is forbidden")
+        if not CONSERVATIVE_SHELL.match(check.strip()):
+            fail(
+                f"task {task_key}: shell checks must start with test, [, or grep; "
+                "prefer a structured argv check"
+            )
         return
     if isinstance(check, dict):
         extra = set(check) - {"argv"}
@@ -146,13 +172,33 @@ def inspect_check(task_key: str, check: Any) -> None:
 
 
 def inspect_flags(task_key: str, values: Iterable[str]) -> None:
-    for item in values:
+    items = list(values)
+    for item, nxt in zip(items, items[1:] + [""]):
         lowered = item.lower()
         if lowered in {flag.lower() for flag in FORBIDDEN_FLAGS}:
             fail(f"task {task_key}: forbidden flag {item}")
+        if item == "--add-dir":
+            fail(f"task {task_key}: extra --add-dir is forbidden")
         if item == "--sandbox" or lowered.startswith("--sandbox="):
-            if lowered.endswith("=off") or lowered.endswith("=none"):
+            target = lowered.split("=", 1)[1] if "=" in lowered else nxt.lower()
+            if target in {"off", "none", "disabled"}:
                 fail(f"task {task_key}: sandbox disable is forbidden")
+
+
+def is_truthy_full_access(value: Any) -> bool:
+    return value is True or value in (1, "1", "true", "True", "yes", "on")
+
+
+def workdir_is_sensitive(workdir: Path) -> bool:
+    home = Path.home().resolve()
+    try:
+        resolved = workdir.resolve()
+    except OSError:
+        resolved = workdir
+    if not (resolved == home or resolved.is_relative_to(home)):
+        return False
+    parts = set(resolved.parts)
+    return any(name in parts for name in SENSITIVE_HOME_DIRS)
 
 
 def validate_manifest(path: Path) -> None:
@@ -180,12 +226,16 @@ def validate_manifest(path: Path) -> None:
 
     if contained(workdir, ringer_root):
         fail("workdir must not be inside the Ringer source repository")
+    if workdir_is_sensitive(workdir):
+        fail("workdir must not be a sensitive home directory")
 
     runtime_roots = parse_roots("RINGER_SAFE_RUNTIME_ROOTS", ())
     artifact_roots = parse_roots("RINGER_SAFE_ARTIFACT_ROOTS", runtime_roots)
-    if workdir.is_absolute() and runtime_roots and contained_in_any(workdir, runtime_roots):
-        # workdir under an approved runtime root is fine
-        pass
+    project_roots = parse_roots("RINGER_SAFE_PROJECT_ROOTS", ())
+    if project_roots or runtime_roots:
+        allowed_work = project_roots + runtime_roots + [Path("/tmp")]
+        if not contained_in_any(workdir, allowed_work):
+            fail("workdir is outside the configured project/runtime roots")
 
     max_parallel = data.get("max_parallel", 1)
     if isinstance(max_parallel, bool) or not isinstance(max_parallel, int):
@@ -196,11 +246,10 @@ def validate_manifest(path: Path) -> None:
     if max_parallel <= 0:
         fail("max_parallel must be positive")
 
-    if data.get("full_access") is True:
+    if is_truthy_full_access(data.get("full_access")):
         fail("full_access is forbidden")
 
     repo_raw = data.get("repo")
-    project_roots = parse_roots("RINGER_SAFE_PROJECT_ROOTS", ())
     if repo_raw is not None:
         if not isinstance(repo_raw, str) or not repo_raw.strip():
             fail("repo must be a non-empty string when set")
@@ -236,7 +285,7 @@ def validate_manifest(path: Path) -> None:
         if not isinstance(spec, str) or not spec.strip():
             fail(f"task {key}: spec is required")
         inspect_check(key, task.get("check", ""))
-        if task.get("full_access") is True:
+        if is_truthy_full_access(task.get("full_access")):
             fail(f"task {key}: full_access is forbidden")
         engine = str(task.get("engine", "codex")).strip()
         if engine not in allowed_engines:
@@ -252,9 +301,9 @@ def validate_manifest(path: Path) -> None:
                 fail(f"task {key}: expect_files must be a list")
             for item in expect_files:
                 text = str(item)
-                if text.startswith("/") and artifact_roots:
-                    output = Path(text)
-                    if not contained_in_any(output, artifact_roots + runtime_roots):
+                if text.startswith("/"):
+                    approved = artifact_roots + runtime_roots
+                    if not approved or not contained_in_any(Path(text), approved):
                         fail(f"task {key}: absolute output path is outside approved roots")
                 if ".." in Path(text).parts:
                     fail(f"task {key}: path traversal in expect_files")

@@ -131,6 +131,13 @@ local loopback socket. AGY itself still runs with `--sandbox` and
 outer Codex sandbox blocks loopback and the real home; AGY's sandbox is
 the worker filesystem floor.
 
+Safe-run manifests may use structured `{"argv": [...]}` checks or a
+conservative shell check that starts with `test`, `[`, or `grep`.
+No-op checks, extra `--add-dir`, absolute `expect_files` outside an
+approved root, and workdirs under sensitive home directories are
+rejected. This is a policy gate for the host wrapper, not a
+hostile-worker jail.
+
 ## Authentication
 
 Do not copy `~/.gemini` into the isolated home. Prefer credentials that

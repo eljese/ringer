@@ -168,7 +168,7 @@ copy_agy_subset() {
   for rel in "$@"; do
     [ -n "$rel" ] || continue
     case "$rel" in
-      /*|~*|..|/*..*|*/../*|*/.. )
+      /*|~*|*..*)
         echo "PREFLIGHT_FAILURE" >&2
         echo "AGY copy path must be a relative path under the real home" >&2
         exit 2
@@ -177,6 +177,16 @@ copy_agy_subset() {
     src="$REAL_HOME/$rel"
     dest="$HOST_HOME/$rel"
     if [ -f "$src" ] && [ ! -L "$src" ]; then
+      src_real="$(realpath -- "$src")"
+      home_real="$(realpath -- "$REAL_HOME")"
+      case "$src_real" in
+        "$home_real"|"$home_real"/*) ;;
+        *)
+          echo "PREFLIGHT_FAILURE" >&2
+          echo "AGY copy path escapes the real home" >&2
+          exit 2
+          ;;
+      esac
       mkdir -p -- "$(dirname -- "$dest")"
       cp -p -- "$src" "$dest"
     fi
