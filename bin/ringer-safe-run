@@ -176,7 +176,8 @@ unlink_auth_path() {
     return 1
   fi
   if [ -n "$stop" ] && path_has_symlink_dir "$path" "$stop"; then
-    return 0
+    fail_cleanup "auth path is under a symlink directory"
+    return 1
   fi
   if [ -d "$path" ] && [ ! -L "$path" ]; then
     fail_cleanup "auth path is a directory; refusing recursive delete"
@@ -215,7 +216,8 @@ scrub_tree_rels() {
     return 0
   fi
   if [ -L "$tree" ]; then
-    return 0
+    fail_cleanup "auth tree is a symlink"
+    return 1
   fi
   if [ ! -d "$tree" ]; then
     return 0

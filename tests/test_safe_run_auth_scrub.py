@@ -404,7 +404,8 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         shutil.rmtree(gemini)
         gemini.symlink_to(outside)
         result = self.source_wrapper("scrub_seeded_auth", str(runtime))
-        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("CLEANUP_FAILURE", result.stdout)
         self.assertTrue(secret.is_file())
         self.assertEqual(secret.read_text(encoding="utf-8"), "keep-me\n")
 
