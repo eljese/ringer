@@ -10,12 +10,14 @@ set -Eeuo pipefail
 umask 077
 
 OWNERSHIP_MARKER=".ringer-safe-runtime"
-# Keep in sync with ringer.DEFAULT_SAFE_AGY_COPY_PATHS.
-# The live token is antigravity-cli/antigravity-oauth-token, not
-# ~/.gemini/antigravity-oauth-token. Unset uses this list; an explicit
-# empty value copies nothing.
-DEFAULT_AGY_COPY_PATHS=".gemini/antigravity-cli/antigravity-oauth-token:.gemini/oauth_creds.json:.gemini/google_accounts.json"
-AUTH_BASENAMES="antigravity-oauth-token:oauth_creds.json:google_accounts.json"
+# Keep in sync with ringer.DEFAULT_SAFE_AGY_COPY_PATHS and
+# ringer.DEFAULT_SAFE_OPENCODE_COPY_PATHS.
+# The live AGY token is antigravity-cli/antigravity-oauth-token, not
+# ~/.gemini/antigravity-oauth-token. OpenCode MiniMax lives in
+# .local/share/opencode/auth.json — never opencode.db. Unset uses this
+# list; an explicit empty value copies nothing.
+DEFAULT_AGY_COPY_PATHS=".gemini/antigravity-cli/antigravity-oauth-token:.gemini/oauth_creds.json:.gemini/google_accounts.json:.local/share/opencode/auth.json"
+AUTH_BASENAMES="antigravity-oauth-token:oauth_creds.json:google_accounts.json:auth.json"
 
 RINGER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME=""
@@ -134,14 +136,15 @@ assert_owned_runtime() {
 list_auth_rels() {
   local rel seen=":"
   local extra="${RINGER_SAFE_AGY_COPY_PATHS:-}"
+  extra="${extra//"${RINGER_SAFE_ROOT_SEP:-:}"/:}"
+  local IFS=':'
   set -f
-  IFS=':'
+  # Split DEFAULT and extra independently. Joining them with a literal
+  # colon glues the last default path onto the first extra path, which
+  # then poisons duplicate detection for OpenCode auth.json.
   # DEFAULT_AGY_COPY_PATHS is always colon-separated.
   # shellcheck disable=SC2086
-  set -- ${DEFAULT_AGY_COPY_PATHS}:${extra//"${RINGER_SAFE_ROOT_SEP:-:}"/:}
-  unset IFS
-  set +f
-  for rel in "$@"; do
+  for rel in ${DEFAULT_AGY_COPY_PATHS} ${extra}; do
     [ -n "$rel" ] || continue
     case "$rel" in
       /*|~*|*..*) continue ;;
@@ -152,6 +155,7 @@ list_auth_rels() {
     seen="${seen}${rel}:"
     printf '%s\n' "$rel"
   done
+  set +f
 }
 
 path_has_symlink_dir() {
@@ -246,7 +250,11 @@ scrub_auth_basenames() {
   if [ -L "$owned" ] || [ ! -d "$owned" ]; then
     return 0
   fi
-  names=(antigravity-oauth-token oauth_creds.json google_accounts.json)
+  local IFS=':'
+  set -f
+  # shellcheck disable=SC2206
+  names=(${AUTH_BASENAMES})
+  set +f
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     base="$(basename -- "$rel")"
@@ -329,11 +337,10 @@ copy_durable_reports() {
 
 copy_agy_subset() {
   local rel dest src src_real home_real
+  local IFS="${RINGER_SAFE_ROOT_SEP:-:}"
   set -f
-  IFS="${RINGER_SAFE_ROOT_SEP:-:}"
   # shellcheck disable=SC2086
   set -- ${RINGER_SAFE_AGY_COPY_PATHS:-}
-  unset IFS
   set +f
   for rel in "$@"; do
     [ -n "$rel" ] || continue

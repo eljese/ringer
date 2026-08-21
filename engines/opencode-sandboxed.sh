@@ -89,12 +89,37 @@ SBEOF
     fi
 
     # OpenCode writes logs, its database, and provider state under these
-    # directories. They are the only user-state paths made writable in the
-    # Linux mount namespace; the rest of the filesystem is read-only.
+    # directories. They, the taskdir, scratch, and optional extra binds
+    # (manifest repo after --tmpfs /tmp) are the writable paths in the Linux
+    # mount namespace; the rest of the filesystem is read-only.
     OC_SHARE="$HOME/.local/share/opencode"
     OC_STATE="$HOME/.local/state/opencode"
     OC_CONFIG="$HOME/.config/opencode"
     mkdir -p "$OC_SHARE" "$OC_STATE" "$OC_CONFIG"
+
+    extra_binds=()
+    if [ -n "${RINGER_OPENCODE_EXTRA_BINDS:-}" ]; then
+      oldifs="${IFS-}"
+      IFS="${RINGER_OPENCODE_BIND_SEP:-:}"
+      set -f
+      # shellcheck disable=SC2086
+      for extra in ${RINGER_OPENCODE_EXTRA_BINDS}; do
+        [ -n "$extra" ] || continue
+        case "$extra" in
+          /|/home|/tmp) continue ;;
+        esac
+        if [ ! -d "$extra" ]; then
+          continue
+        fi
+        extra_real="$(cd "$extra" && pwd -P)"
+        case "$extra_real" in
+          /|/home|/tmp) continue ;;
+        esac
+        extra_binds+=(--bind "$extra_real" "$extra_real")
+      done
+      set +f
+      IFS="$oldifs"
+    fi
 
     set +e
     "$BWRAP_BIN" \
@@ -112,6 +137,7 @@ SBEOF
       --bind "$OC_SHARE" "$OC_SHARE" \
       --bind "$OC_STATE" "$OC_STATE" \
       --bind "$OC_CONFIG" "$OC_CONFIG" \
+      "${extra_binds[@]}" \
       --setenv TMPDIR "$SCRATCH" \
       --setenv XDG_CACHE_HOME "$XDG_CACHE_HOME" \
       --chdir "$TASKDIR_REAL" \

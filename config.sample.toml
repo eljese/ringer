@@ -278,7 +278,8 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # OpenCode has no OS sandbox, so `bin` points at the cross-platform Ringer
 # wrapper. It uses Seatbelt on macOS and bubblewrap on Linux. Auth is managed
 # by OpenCode in ~/.local/share/opencode/auth.json; confirm providers with
-# `opencode auth list`.
+# `opencode auth list`. Isolated runtimes seed that file into worker HOME;
+# they never copy opencode.db or point HOME at the operator home.
 # Per-task engine_args can set reasoning effort ("--variant", "low|high|max").
 # Uncomment and set an absolute path for `bin` to enable.
 # [engines.opencode]

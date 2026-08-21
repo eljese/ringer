@@ -458,6 +458,13 @@ class EngineEnvTests(IsolationTestCase):
             ringer.DEFAULT_SAFE_AGY_COPY_PATHS,
         )
 
+    def test_default_copy_paths_include_opencode_auth_json(self) -> None:
+        os.environ.pop("RINGER_SAFE_AGY_COPY_PATHS", None)
+        self.assertIn(
+            ".local/share/opencode/auth.json",
+            ringer.credential_copy_rels(),
+        )
+
     def test_isolated_worker_env_preserves_xdg_runtime_dir(self) -> None:
         overlay = dict(
             ringer.default_isolated_engine_env(
@@ -592,6 +599,129 @@ class EngineEnvTests(IsolationTestCase):
         )
         assert env is not None
         self.assertEqual((Path(env["HOME"]) / rel).read_text(encoding="utf-8"), "seeded\n")
+
+    def test_worker_home_receives_seeded_opencode_auth_json(self) -> None:
+        seed = self.root / "seed-home"
+        rel = Path(".local/share/opencode/auth.json")
+        src = seed / rel
+        src.parent.mkdir(parents=True)
+        src.write_text("opencode-auth\n", encoding="utf-8")
+        os.environ.pop("RINGER_SAFE_AGY_COPY_PATHS", None)
+        os.environ["RINGER_SAFE_SEED_HOME"] = str(seed)
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="opencode",
+            bin="opencode",
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+        )
+        assert env is not None
+        self.assertEqual((Path(env["HOME"]) / rel).read_text(encoding="utf-8"), "opencode-auth\n")
+
+    def test_worker_env_exports_repo_not_taskdir_ancestor_as_opencode_extra_bind(self) -> None:
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="opencode",
+            bin="opencode",
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        workdir = self.root / "workspace"
+        repo = self.root / "repo"
+        workdir.mkdir()
+        repo.mkdir()
+        taskdir = workdir / "task-a"
+        taskdir.mkdir()
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=taskdir,
+            workdir=workdir,
+            extra_bind_dirs=(repo,),
+        )
+        assert env is not None
+        binds = env["RINGER_OPENCODE_EXTRA_BINDS"].split(":")
+        self.assertNotIn(str(workdir.resolve()), binds)
+        self.assertIn(str(repo.resolve()), binds)
+        self.assertNotIn(str(taskdir.resolve()), binds)
+
+    def test_worker_env_exports_extra_binds_without_runtime_root(self) -> None:
+        config = ringer.AppConfig.load(self.empty_config())
+        engine = ringer.EngineConfig(
+            name="opencode",
+            bin="opencode",
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        workdir = self.root / "workspace"
+        repo = self.root / "repo"
+        workdir.mkdir()
+        repo.mkdir()
+        taskdir = workdir / "task-a"
+        taskdir.mkdir()
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=taskdir,
+            workdir=workdir,
+            extra_bind_dirs=(repo,),
+        )
+        assert env is not None
+        binds = env["RINGER_OPENCODE_EXTRA_BINDS"].split(":")
+        self.assertIn(str(repo.resolve()), binds)
+
+    def test_opencode_extra_bind_dirs_skip_root_home_and_tmp(self) -> None:
+        taskdir = self.root / "task-a"
+        taskdir.mkdir()
+        binds = ringer._opencode_extra_bind_dirs(
+            taskdir=taskdir,
+            workdir=Path("/tmp"),
+            extra_bind_dirs=(Path("/"), Path("/home")),
+        )
+        self.assertEqual([], binds)
+
+    def test_empty_copy_paths_skip_opencode_auth_json(self) -> None:
+        seed = self.root / "seed-home"
+        rel = Path(".local/share/opencode/auth.json")
+        src = seed / rel
+        src.parent.mkdir(parents=True)
+        src.write_text("opencode-auth\n", encoding="utf-8")
+        os.environ["RINGER_SAFE_AGY_COPY_PATHS"] = ""
+        os.environ["RINGER_SAFE_SEED_HOME"] = str(seed)
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="opencode",
+            bin="opencode",
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+        )
+        assert env is not None
+        self.assertFalse((Path(env["HOME"]) / rel).is_file())
 
 
 class PreflightTests(IsolationTestCase):
