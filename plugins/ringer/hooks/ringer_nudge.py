@@ -32,6 +32,9 @@ HARNESS_RE = re.compile(
 
 
 def ringer_home() -> Path:
+    runtime = os.environ.get("RINGER_RUNTIME_ROOT")
+    if runtime and runtime.strip():
+        return Path(runtime).expanduser()
     value = os.environ.get("RINGER_HOME")
     if value and value.strip():
         return Path(value).expanduser()

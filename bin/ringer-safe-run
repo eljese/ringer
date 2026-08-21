@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Isolated host entrypoint for sandboxed AGY review runs.
+#
+# Codex/orchestrator -> bin/ringer-safe-run -> validator -> isolated Ringer
+# -> isolated engine HOME/XDG/TMP -> sandboxed AGY.
+#
+# Never set allow_full_access. Never add --dangerously-skip-permissions.
+# Never launch agy or ringer.py for AGY review from the outer Codex sandbox.
+set -Eeuo pipefail
+umask 077
+
+usage() {
+  echo "usage: ringer-safe-run --manifest PATH --identity NAME [--keep-runtime]" >&2
+  exit 64
+}
+
+RINGER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${RINGER_PYTHON:-python3}"
+MANIFEST=""
+IDENTITY=""
+CONFIG="${RINGER_SAFE_CONFIG:-$RINGER_ROOT/config.safe.toml}"
+KEEP_RUNTIME=0
+# Keep in sync with ringer.DEFAULT_SAFE_AGY_COPY_PATHS.
+# The live token is antigravity-cli/antigravity-oauth-token, not
+# ~/.gemini/antigravity-oauth-token. Unset uses this list; an explicit
+# empty value copies nothing.
+DEFAULT_AGY_COPY_PATHS=".gemini/antigravity-cli/antigravity-oauth-token:.gemini/oauth_creds.json:.gemini/google_accounts.json"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --manifest)
+      [ "$#" -ge 2 ] || usage
+      MANIFEST="$2"
+      shift 2
+      ;;
+    --identity)
+      [ "$#" -ge 2 ] || usage
+      IDENTITY="$2"
+      shift 2
+      ;;
+    --config)
+      [ "$#" -ge 2 ] || usage
+      echo "MANIFEST_POLICY_FAILURE" >&2
+      echo "pass config via RINGER_SAFE_CONFIG; --config is ignored" >&2
+      exit 2
+      ;;
+    --keep-runtime)
+      KEEP_RUNTIME=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "ringer-safe-run: unknown argument: $1" >&2
+      usage
+      ;;
+  esac
+done
+
+if [ -z "$MANIFEST" ] || [ -z "$IDENTITY" ]; then
+  usage
+fi
+
+case "$IDENTITY" in
+  *[!A-Za-z0-9._@+-]*|"")
+    echo "MANIFEST_POLICY_FAILURE" >&2
+    echo "identity contains unsafe characters" >&2
+    exit 2
+    ;;
+esac
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "python interpreter not found: $PYTHON_BIN" >&2
+  exit 2
+fi
+
+if [ ! -f "$RINGER_ROOT/ringer.py" ]; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "ringer.py not found under $RINGER_ROOT" >&2
+  exit 2
+fi
+
+if [ ! -f "$CONFIG" ]; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "safe config not found: $CONFIG" >&2
+  exit 2
+fi
+
+if [ ! -f "$MANIFEST" ]; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "manifest not found" >&2
+  exit 2
+fi
+
+if ! command -v realpath >/dev/null 2>&1; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "realpath is required on this host" >&2
+  exit 2
+fi
+
+MANIFEST="$(realpath -- "$MANIFEST")"
+CONFIG="$(realpath -- "$CONFIG")"
+RINGER_ROOT="$(realpath -- "$RINGER_ROOT")"
+
+is_under() {
+  local path="$1"
+  local root="$2"
+  case "$path" in
+    "$root"|"$root"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+manifest_allowed=0
+set -f
+IFS="${RINGER_SAFE_ROOT_SEP:-:}"
+# shellcheck disable=SC2086
+set -- ${RINGER_SAFE_MANIFEST_ROOTS:-}
+unset IFS
+set +f
+if [ "$#" -eq 0 ]; then
+  set -- "$RINGER_ROOT/templates" "$RINGER_ROOT/manifests"
+fi
+for root in "$@"; do
+  [ -n "$root" ] || continue
+  root="$(realpath -- "$root" 2>/dev/null || printf '%s' "$root")"
+  if is_under "$MANIFEST" "$root"; then
+    manifest_allowed=1
+    break
+  fi
+done
+if [ "$manifest_allowed" -ne 1 ]; then
+  echo "MANIFEST_POLICY_FAILURE" >&2
+  echo "manifest is outside the configured safe roots" >&2
+  exit 2
+fi
+
+PARENT="${RINGER_SAFE_RUNTIME_PARENT:-${TMPDIR:-/tmp}}"
+PARENT="$(realpath -- "$PARENT" 2>/dev/null || printf '%s' "$PARENT")"
+if is_under "$PARENT" "$RINGER_ROOT"; then
+  echo "RUNTIME_PATH_ESCAPE" >&2
+  echo "runtime parent is inside the Ringer source repository" >&2
+  exit 2
+fi
+
+if ! RUNTIME="$(mktemp -d -- "$PARENT/ringer-runtime.XXXXXX")"; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "could not create isolated runtime directory" >&2
+  exit 2
+fi
+
+RUNTIME="$(realpath -- "$RUNTIME")"
+if is_under "$RUNTIME" "$RINGER_ROOT"; then
+  echo "RUNTIME_PATH_ESCAPE" >&2
+  echo "runtime directory is inside the Ringer source repository" >&2
+  exit 2
+fi
+
+REAL_HOME="${HOME}"
+export RINGER_SAFE_REAL_HOME="$REAL_HOME"
+HOST_HOME="$RUNTIME/host-home"
+mkdir -p -- \
+  "$HOST_HOME/.config" \
+  "$HOST_HOME/.cache" \
+  "$HOST_HOME/.local/state" \
+  "$HOST_HOME/.local/share" \
+  "$HOST_HOME/.gemini/antigravity-cli/logs" \
+  "$HOST_HOME/.gemini/antigravity-cli/crash" \
+  "$RUNTIME/tmp" \
+  "$RUNTIME/engine-homes" \
+  "$RUNTIME/work" \
+  "$RUNTIME/artifacts" \
+  "$RUNTIME/logs"
+
+if [ -z "${RINGER_SAFE_AGY_COPY_PATHS+x}" ]; then
+  RINGER_SAFE_AGY_COPY_PATHS="$DEFAULT_AGY_COPY_PATHS"
+fi
+export RINGER_SAFE_AGY_COPY_PATHS
+
+copy_agy_subset() {
+  local rel dest src
+  set -f
+  IFS="${RINGER_SAFE_ROOT_SEP:-:}"
+  # shellcheck disable=SC2086
+  set -- ${RINGER_SAFE_AGY_COPY_PATHS:-}
+  unset IFS
+  set +f
+  for rel in "$@"; do
+    [ -n "$rel" ] || continue
+    case "$rel" in
+      /*|~*|*..*)
+        echo "PREFLIGHT_FAILURE" >&2
+        echo "AGY copy path must be a relative path under the real home" >&2
+        exit 2
+        ;;
+    esac
+    src="$REAL_HOME/$rel"
+    dest="$HOST_HOME/$rel"
+    if [ -f "$src" ] && [ ! -L "$src" ]; then
+      src_real="$(realpath -- "$src")"
+      home_real="$(realpath -- "$REAL_HOME")"
+      case "$src_real" in
+        "$home_real"|"$home_real"/*) ;;
+        *)
+          echo "PREFLIGHT_FAILURE" >&2
+          echo "AGY copy path escapes the real home" >&2
+          exit 2
+          ;;
+      esac
+      mkdir -p -- "$(dirname -- "$dest")"
+      cp -p -- "$src" "$dest"
+    fi
+  done
+}
+export RINGER_RUNTIME_ROOT="$RUNTIME"
+export RINGER_HOME="$RUNTIME"
+export RINGER_NO_SELF_UPDATE=1
+export RINGER_NO_CATALOG_REFRESH=1
+export RINGER_SAFE_ENFORCE=1
+export HOME="$HOST_HOME"
+export XDG_CONFIG_HOME="$HOST_HOME/.config"
+export XDG_CACHE_HOME="$HOST_HOME/.cache"
+export XDG_STATE_HOME="$HOST_HOME/.local/state"
+export XDG_DATA_HOME="$HOST_HOME/.local/share"
+export TMPDIR="$RUNTIME/tmp"
+export RINGER_SAFE_SOURCE_REPO="${RINGER_SAFE_SOURCE_REPO:-$RINGER_ROOT}"
+
+status=0
+"$PYTHON_BIN" "$RINGER_ROOT/tools/validate_safe_manifest.py" --manifest "$MANIFEST" || status=$?
+if [ "$status" -ne 0 ]; then
+  echo "ringer-safe-run: validator failed; runtime preserved at $RUNTIME" >&2
+  exit "$status"
+fi
+
+copy_agy_subset
+export RINGER_SAFE_SEED_HOME="$HOST_HOME"
+
+"$PYTHON_BIN" "$RINGER_ROOT/ringer.py" \
+  --config "$CONFIG" \
+  --runtime-root "$RUNTIME" \
+  --no-self-update \
+  preflight \
+  --manifest "$MANIFEST" || status=$?
+if [ "$status" -ne 0 ]; then
+  echo "ringer-safe-run: preflight failed; runtime preserved at $RUNTIME" >&2
+  echo "Do not retry inside the outer Codex sandbox." >&2
+  echo "Do not set allow_full_access=true." >&2
+  exit "$status"
+fi
+
+set +e
+"$PYTHON_BIN" "$RINGER_ROOT/ringer.py" \
+  --config "$CONFIG" \
+  --runtime-root "$RUNTIME" \
+  --no-self-update \
+  run \
+  "$MANIFEST" \
+  --identity "$IDENTITY" \
+  --no-dashboard
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  echo "ringer-safe-run: run failed ($status); runtime preserved at $RUNTIME" >&2
+  exit "$status"
+fi
+
+echo "RINGER_RUNTIME_ROOT=$RUNTIME"
+if [ "$KEEP_RUNTIME" -eq 0 ] && [ "${RINGER_SAFE_CLEAN_SUCCESS:-0}" = "1" ]; then
+  if [ -n "${RINGER_SAFE_REPORT_DIR:-}" ]; then
+    mkdir -p -- "$RINGER_SAFE_REPORT_DIR"
+    if [ -d "$RUNTIME/artifacts" ]; then
+      cp -a -- "$RUNTIME/artifacts/." "$RINGER_SAFE_REPORT_DIR/"
+    fi
+  fi
+  rm -rf -- "$RUNTIME/tmp" "$RUNTIME/engine-homes" "$RUNTIME/work" "$RUNTIME/host-home"
+else
+  echo "ringer-safe-run: runtime retained at $RUNTIME (set RINGER_SAFE_CLEAN_SUCCESS=1 to drop ephemeral dirs)"
+fi
+exit 0

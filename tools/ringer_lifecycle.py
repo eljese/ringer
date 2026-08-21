@@ -33,6 +33,10 @@ FAILURE_CLASSES = (
     "PROVIDER_QUOTA",
     "PROVIDER_TIMEOUT",
     "NETWORK_SANDBOX",
+    "HOME_ISOLATION_FAILURE",
+    "RUNTIME_PATH_ESCAPE",
+    "PREFLIGHT_FAILURE",
+    "MANIFEST_POLICY_FAILURE",
     "STALE_WORKTREE",
     "STALE_ARTIFACT",
     "MISSING_EXPORT",
@@ -107,6 +111,14 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def classify_failure(text: str, *, returncode: int | None = None) -> str:
+    if "HOME_ISOLATION_FAILURE" in text:
+        return "HOME_ISOLATION_FAILURE"
+    if "RUNTIME_PATH_ESCAPE" in text:
+        return "RUNTIME_PATH_ESCAPE"
+    if "MANIFEST_POLICY_FAILURE" in text:
+        return "MANIFEST_POLICY_FAILURE"
+    if "PREFLIGHT_FAILURE" in text:
+        return "PREFLIGHT_FAILURE"
     lower = text.lower()
     if any(token in lower for token in ("quota", "rate limit", "usage limit", "credits exhausted")):
         return "PROVIDER_QUOTA"

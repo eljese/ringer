@@ -8,7 +8,11 @@
 # identity_default = "codex-mini"
 
 # State files live under <state_dir>/runs/<run_id>.json.
-state_dir = "~/.ringer"
+# Default is ~/.ringer. When --runtime-root or RINGER_RUNTIME_ROOT is set,
+# that directory becomes authoritative: state, eval JSONL, artifacts,
+# active-runs, HUD logs, catalog, and self-update files are rewritten
+# under it even if this file still names ~/.ringer.
+# state_dir = "~/.ringer"
 
 # First localhost port tried for the per-run dashboard. The server will scan the
 # next 49 ports if this one is busy.
@@ -34,7 +38,8 @@ allow_full_access = false
 
 # Optional model steering. The directory must contain profiles/ with one
 # Markdown profile per model. Ringer creates observations/ringer/ beneath this
-# directory automatically as attempts finish.
+# directory automatically as attempts finish. Under --runtime-root, observation
+# writes that would escape the root are relocated under <runtime-root>/steering.
 # [steering]
 # dir = "~/.ringer/steering"
 # inject_candidates = true
@@ -42,8 +47,9 @@ allow_full_access = false
 [eval]
 # Safe public default: write one JSON object per attempt to a local JSONL file.
 # Use "postgres" only when [eval.postgres] is configured.
+# jsonl_path defaults to <state_dir>/runs.jsonl (or <runtime-root>/runs.jsonl
+# when isolation is active).
 backend = "jsonl"
-jsonl_path = "~/.ringer/runs.jsonl"
 
 # Optional Supabase/Postgres logging. The env file should define:
 # SUPABASE_DB_HOST, SUPABASE_DB_PORT, SUPABASE_DB_USER,
@@ -178,6 +184,19 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # full_access_args = ["--dangerously-skip-permissions"]
 # Token output format for agy 1.1.13 not yet verified — leave disabled.
 # token_regex = ""
+#
+# Optional per-task engine HOME/XDG/TMP. Placeholders are expanded without a
+# shell: {runtime_root}, {run_id}, {task_key}, {taskdir}. When isolation is
+# active, Ringer already overlays these directories; an explicit table may
+# refine the layout but cannot escape the runtime root.
+# `ringer.py --runtime-root` is write/state containment, not the host wrapper.
+# AGY review from an outer sandbox must use bin/ringer-safe-run.
+# [engines.agy.env]
+# HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}"
+# XDG_CONFIG_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.config"
+# XDG_CACHE_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.cache"
+# XDG_STATE_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.local/state"
+# TMPDIR = "{runtime_root}/tmp/{run_id}/{task_key}"
 
 # Claude Code (Anthropic) — Anthropic's official headless CLI.
 # Install: `npm install -g @anthropic-ai/claude-code` (or the
@@ -291,7 +310,6 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 #   - `index_out`: a single multi-run index listing every run under state_dir (handy when
 #     several swarms run at once).
 # Templates support {run_id} and {run_name} substitution. Disable with --no-artifact.
+# Paths default to <state_dir>/artifacts/ and are rewritten under the runtime
+# root when isolation is active.
 enabled = true
-out = "~/.ringer/artifacts/{run_id}.html"
-report_out = "~/.ringer/artifacts/{run_id}-report.html"
-index_out = "~/.ringer/artifacts/index.html"

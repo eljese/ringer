@@ -7,6 +7,10 @@ block in `config.sample.toml` that runs `agy` as a Ringer worker.
 
 1. Install `agy` (see vendor docs).
 2. Run `agy` interactively once to complete browser-based auth.
+   Isolated `bin/ringer-safe-run` seeds
+   `~/.gemini/antigravity-cli/antigravity-oauth-token` (not
+   `~/.gemini/antigravity-oauth-token`) plus `oauth_creds.json` and
+   `google_accounts.json`. It does not copy the rest of `~/.gemini`.
 3. Verify what models your account can reach:
    ```bash
    agy models
@@ -116,6 +120,31 @@ Avoid `plan` mode for write tasks — it only emits plans.
 - the config has `allow_full_access = true` (the belt-and-suspenders gate).
 
 Without that dual opt-in, the bypass is impossible regardless of what the worker prompt says. This matches the same model the codex block uses — sandbox is the floor, full-access is an explicit per-task opt-in you must request from a human.
+
+## Runtime isolation
+
+`RINGER_HOME` is not enough. Orchestrators that launch `agy` or `ringer.py`
+from an outer Codex sandbox hit unwritable `HOME`/`XDG` and a blocked
+loopback socket. The recovery is **not** `allow_full_access = true`.
+
+Run AGY-backed Ringer tasks only through `bin/ringer-safe-run`.
+
+Never launch `agy` or `ringer.py` directly from the outer Codex sandbox.
+Never change `allow_full_access` to true to recover from HOME, XDG,
+socket, dashboard, artifact, or state-path failures.
+
+If the safe runner reports `NETWORK_SANDBOX`, `HOME_ISOLATION_FAILURE`,
+`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, or `PREFLIGHT_FAILURE`,
+stop and report the infrastructure failure. Do not retry by weakening
+permissions.
+
+See `docs/runtime-isolation.md` for precedence, path containment, engine
+env templates, and the safe-run contract. `ringer.py --runtime-root` is
+not equivalent to `bin/ringer-safe-run`: the wrapper re-validates the
+manifest, seeds listed AGY files into each worker HOME, and keeps the
+process HOME on the isolated host-home. Isolation contains writes and
+runtime state; it is not a confidentiality sandbox. Native Ringside.app
+(`hud/src`) is a parked prototype and does not honor `RINGER_RUNTIME_ROOT`.
 
 If you want a sandbox-stricter mode than agy's default `--sandbox` provides, check `agy --help` for any `--sandbox=<profile>` form on your installed version and override the literal flag in `args_template`.
 

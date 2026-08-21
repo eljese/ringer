@@ -1,0 +1,42 @@
+# Safe-run configuration for isolated AGY review.
+# Used by bin/ringer-safe-run. Do not set allow_full_access.
+# State, eval, and artifacts are derived from --runtime-root /
+# RINGER_RUNTIME_ROOT. Do not point them at the Ringer checkout.
+
+allow_full_access = false
+
+[update]
+auto = false
+
+[eval]
+backend = "jsonl"
+
+[artifact]
+enabled = true
+
+[engines.agy]
+bin = "agy"
+model_default = "gemini-3.7-flash-high"
+args_template = [
+  "--add-dir",
+  "{taskdir}",
+  "--model",
+  "{model}",
+  "--mode",
+  "accept-edits",
+  "--sandbox",
+  "{access_args}",
+  "{engine_args}",
+  "-p",
+  "{spec}",
+]
+sandbox_args = []
+full_access_args = []
+token_regex = ""
+
+[engines.agy.env]
+HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}"
+XDG_CONFIG_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.config"
+XDG_CACHE_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.cache"
+XDG_STATE_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.local/state"
+TMPDIR = "{runtime_root}/tmp/{run_id}/{task_key}"
