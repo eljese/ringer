@@ -133,11 +133,12 @@ assert_owned_runtime() {
 
 list_auth_rels() {
   local rel seen=":"
-  local sep="${RINGER_SAFE_ROOT_SEP:-:}"
+  local extra="${RINGER_SAFE_AGY_COPY_PATHS:-}"
   set -f
-  IFS="$sep"
+  IFS=':'
+  # DEFAULT_AGY_COPY_PATHS is always colon-separated.
   # shellcheck disable=SC2086
-  set -- ${DEFAULT_AGY_COPY_PATHS}:${RINGER_SAFE_AGY_COPY_PATHS:-}
+  set -- ${DEFAULT_AGY_COPY_PATHS}:${extra//"${RINGER_SAFE_ROOT_SEP:-:}"/:}
   unset IFS
   set +f
   for rel in "$@"; do
@@ -153,11 +154,29 @@ list_auth_rels() {
   done
 }
 
+path_has_symlink_dir() {
+  local path="$1"
+  local stop="$2"
+  local cur
+  cur="$(dirname -- "$path")"
+  while [ -n "$cur" ] && [ "$cur" != "$stop" ] && [ "$cur" != "/" ]; do
+    if [ -L "$cur" ]; then
+      return 0
+    fi
+    cur="$(dirname -- "$cur")"
+  done
+  return 1
+}
+
 unlink_auth_path() {
   local path="$1"
+  local stop="${2:-}"
   if [ -z "$path" ] || [ "$path" = "/" ]; then
     fail_cleanup "refusing to unlink an empty path"
     return 1
+  fi
+  if [ -n "$stop" ] && path_has_symlink_dir "$path" "$stop"; then
+    return 0
   fi
   if [ -d "$path" ] && [ ! -L "$path" ]; then
     fail_cleanup "auth path is a directory; refusing recursive delete"
@@ -208,11 +227,11 @@ scrub_tree_rels() {
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     dest="$tree/$rel"
-    unlink_auth_path "$dest" || return 1
+    unlink_auth_path "$dest" "$tree" || return 1
     rmdir_empty_parents "$(dirname -- "$dest")" "$tree"
     while IFS= read -r -d '' dest; do
       [ -n "$dest" ] || continue
-      unlink_auth_path "$dest" || return 1
+      unlink_auth_path "$dest" "$tree" || return 1
       rmdir_empty_parents "$(dirname -- "$dest")" "$tree"
     done < <(find -P "$tree" \( -type f -o -type l \) -path "*/$rel" -print0)
   done < <(list_auth_rels)
@@ -251,7 +270,7 @@ scrub_auth_basenames() {
     if ! is_under "$found" "$owned"; then
       continue
     fi
-    unlink_auth_path "$found" || return 1
+    unlink_auth_path "$found" "$owned" || return 1
   done < <(find -P "$owned" \( -type f -o -type l \) \( "${pred[@]}" \) -print0)
 }
 
@@ -351,7 +370,6 @@ forward_signal() {
   while [ "$n" -lt 5 ]; do
     pgrep -P $$ >/dev/null 2>&1 || break
     sleep 1
-    wait 2>/dev/null || true
     n=$((n + 1))
   done
   pkill -KILL -P $$ 2>/dev/null || true

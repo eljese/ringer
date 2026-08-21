@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -392,6 +393,20 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         self.assertTrue(outside.is_file())
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep-me\n")
         self.assertFalse(link.exists())
+
+    def test_cleanup_does_not_follow_directory_symlinks(self) -> None:
+        runtime = self.make_owned_runtime()
+        outside = self.root / "outside-gemini"
+        outside.mkdir()
+        secret = outside / "oauth_creds.json"
+        secret.write_text("keep-me\n", encoding="utf-8")
+        gemini = runtime / "host-home" / ".gemini"
+        shutil.rmtree(gemini)
+        gemini.symlink_to(outside)
+        result = self.source_wrapper("scrub_seeded_auth", str(runtime))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(secret.is_file())
+        self.assertEqual(secret.read_text(encoding="utf-8"), "keep-me\n")
 
     def test_cleanup_is_idempotent(self) -> None:
         runtime = self.make_owned_runtime()
