@@ -447,6 +447,46 @@ class EngineEnvTests(IsolationTestCase):
         bravo = json.loads((workdir / "bravo" / "env.json").read_text(encoding="utf-8"))
         self.assertNotEqual(alpha["HOME"], bravo["HOME"])
 
+    def test_default_agy_copy_paths_use_cli_oauth_token(self) -> None:
+        self.assertIn(
+            ".gemini/antigravity-cli/antigravity-oauth-token",
+            ringer.DEFAULT_SAFE_AGY_COPY_PATHS,
+        )
+        self.assertNotIn(
+            ".gemini/antigravity-oauth-token",
+            ringer.DEFAULT_SAFE_AGY_COPY_PATHS,
+        )
+
+    def test_isolated_worker_env_preserves_xdg_runtime_dir(self) -> None:
+        overlay = dict(
+            ringer.default_isolated_engine_env(
+                engine_name="agy",
+                runtime_root=Path("/rt"),
+                run_id="run-1",
+                task_key="task-a",
+            )
+        )
+        self.assertNotIn("XDG_RUNTIME_DIR", overlay)
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="mock",
+            bin=sys.executable,
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+            inherited={"PATH": "/usr/bin", "XDG_RUNTIME_DIR": "/run/user/3000", "HOME": "/tmp/x"},
+        )
+        assert env is not None
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/3000")
+
     def test_isolated_worker_env_includes_agy_scratch_dir(self) -> None:
         overlay = dict(
             ringer.default_isolated_engine_env(
@@ -1209,6 +1249,70 @@ class SafeRunWrapperTests(IsolationTestCase):
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("MANIFEST_POLICY_FAILURE", result.stdout)
+
+    def test_wrapper_seeds_default_agy_oauth_token(self) -> None:
+        fake_home = self.root / "real-home"
+        token = fake_home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+        token.parent.mkdir(parents=True)
+        token.write_text("fake-token\n", encoding="utf-8")
+        allowed = self.root / "safe-manifests"
+        allowed.mkdir()
+        workdir = self.root / "work"
+        manifest = allowed / "mock.json"
+        config = self.root / "mock.toml"
+        self.write_legacy_config(config)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "run_name": "seed-oauth",
+                    "workdir": str(workdir),
+                    "max_parallel": 1,
+                    "tasks": [
+                        {
+                            "key": "hello-task",
+                            "engine": "mock",
+                            "spec": "MOCK_FILE: hello.txt\nhello\nMOCK_END",
+                            "check": "grep -q hello hello.txt",
+                            "expect_files": ["hello.txt"],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["HOME"] = str(fake_home)
+        env["RINGER_SAFE_MANIFEST_ROOTS"] = str(allowed)
+        env["RINGER_SAFE_ALLOWED_ENGINES"] = "mock"
+        env["RINGER_SAFE_CONFIG"] = str(config)
+        env.pop("RINGER_SAFE_AGY_COPY_PATHS", None)
+        env["RINGER_NO_SELF_UPDATE"] = "1"
+        result = subprocess.run(
+            [
+                str(ROOT / "bin" / "ringer-safe-run"),
+                "--manifest",
+                str(manifest),
+                "--identity",
+                "iso-test",
+                "--keep-runtime",
+            ],
+            cwd=str(ROOT),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        runtime_line = [
+            line for line in result.stdout.splitlines() if line.startswith("RINGER_RUNTIME_ROOT=")
+        ]
+        self.assertTrue(runtime_line, result.stdout)
+        runtime = Path(runtime_line[-1].split("=", 1)[1])
+        seeded = list(runtime.glob("engine-homes/**/.gemini/antigravity-cli/antigravity-oauth-token"))
+        self.assertTrue(seeded, result.stdout)
+        self.assertEqual(seeded[0].read_text(encoding="utf-8"), "fake-token\n")
 
     def test_wrapper_rejects_cli_config_override(self) -> None:
         result = subprocess.run(

@@ -184,6 +184,14 @@ SAFE_ALLOWED_ENGINES_ENV = "RINGER_SAFE_ALLOWED_ENGINES"
 SAFE_AGY_COPY_PATHS_ENV = "RINGER_SAFE_AGY_COPY_PATHS"
 SAFE_SEED_HOME_ENV = "RINGER_SAFE_SEED_HOME"
 DEFAULT_SAFE_ALLOWED_ENGINES = ("agy", "mock")
+# Narrow AGY auth files only. Never logs, scratch, brain, or the whole
+# ~/.gemini tree. The working token lives under antigravity-cli/, not
+# ~/.gemini/antigravity-oauth-token.
+DEFAULT_SAFE_AGY_COPY_PATHS = (
+    ".gemini/antigravity-cli/antigravity-oauth-token",
+    ".gemini/oauth_creds.json",
+    ".gemini/google_accounts.json",
+)
 LIFECYCLE_OWNERSHIP_MARKER = ".ringer-lifecycle.json"
 LIFECYCLE_REPORT_NAMES = frozenset(
     {"report.md", "report.html", "fix-summary.md", "notes.md"}
@@ -1913,7 +1921,6 @@ def default_isolated_engine_env(
         ("XDG_CACHE_HOME", f"{home}/.cache"),
         ("XDG_STATE_HOME", f"{home}/.local/state"),
         ("XDG_DATA_HOME", f"{home}/.local/share"),
-        ("XDG_RUNTIME_DIR", f"{home}/.run"),
         ("TMPDIR", tmp),
         ("TEMP", tmp),
         ("TMP", tmp),

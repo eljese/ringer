@@ -183,13 +183,25 @@ gate for the host wrapper, not a hostile-worker jail.
 
 ## Authentication
 
-Do not copy `~/.gemini` into the isolated home. Prefer credentials that
-already exist in the process environment (provider tokens, keyring
-sockets). If a file must be seeded, list a relative path under the real
-home in `RINGER_SAFE_AGY_COPY_PATHS`. The wrapper copies those files
-into the isolated host-home and Ringer seeds the same relative paths
-into each worker HOME from `RINGER_SAFE_SEED_HOME`. Failed-run trees are
-diagnostics; do not store long-lived credentials there.
+Do not copy `~/.gemini` wholesale. Isolated `HOME` is what made a working
+terminal AGY session look unauthenticated: AGY reads
+`~/.gemini/antigravity-cli/antigravity-oauth-token` (not
+`~/.gemini/antigravity-oauth-token`). Keyring/D-Bus alone is not enough
+on this host.
+
+When `RINGER_SAFE_AGY_COPY_PATHS` is unset, the wrapper seeds only:
+
+- `.gemini/antigravity-cli/antigravity-oauth-token`
+- `.gemini/oauth_creds.json`
+- `.gemini/google_accounts.json`
+
+Set the variable to empty to copy nothing, or list extra relative files
+under the real home. The wrapper copies those files into the isolated
+host-home and Ringer seeds the same relative paths into each worker HOME
+from `RINGER_SAFE_SEED_HOME`. Isolated workers inherit the process
+`XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` so a session bus still
+works; they do not remap `XDG_RUNTIME_DIR` under engine-home. Failed-run
+trees are diagnostics; do not store long-lived credentials there.
 
 ## Failed-run artifacts
 
@@ -218,7 +230,7 @@ when that is set.
 | `RINGER_SAFE_MAX_PARALLEL` | Parallelism cap | `4` |
 | `RINGER_SAFE_RUNTIME_PARENT` | `mktemp` parent | `$TMPDIR` or `/tmp` |
 | `RINGER_SAFE_CONFIG` | Config passed to Ringer | `<checkout>/config.safe.toml` |
-| `RINGER_SAFE_AGY_COPY_PATHS` | Relative files copied from the real home into host-home and each worker HOME | empty |
+| `RINGER_SAFE_AGY_COPY_PATHS` | Relative files copied from the real home into host-home and each worker HOME | oauth token, `oauth_creds.json`, `google_accounts.json` (unset = that list; empty = nothing) |
 | `RINGER_SAFE_SEED_HOME` | Source tree for worker HOME seeding | wrapper host-home |
 | `RINGER_SAFE_ENFORCE` | Re-validate the manifest and apply the engine allowlist during preflight | unset (`1` in the wrapper) |
 

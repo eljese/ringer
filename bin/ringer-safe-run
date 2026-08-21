@@ -20,6 +20,11 @@ MANIFEST=""
 IDENTITY=""
 CONFIG="${RINGER_SAFE_CONFIG:-$RINGER_ROOT/config.safe.toml}"
 KEEP_RUNTIME=0
+# Keep in sync with ringer.DEFAULT_SAFE_AGY_COPY_PATHS.
+# The live token is antigravity-cli/antigravity-oauth-token, not
+# ~/.gemini/antigravity-oauth-token. Unset uses this list; an explicit
+# empty value copies nothing.
+DEFAULT_AGY_COPY_PATHS=".gemini/antigravity-cli/antigravity-oauth-token:.gemini/oauth_creds.json:.gemini/google_accounts.json"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -162,6 +167,11 @@ mkdir -p -- \
   "$RUNTIME/work" \
   "$RUNTIME/artifacts" \
   "$RUNTIME/logs"
+
+if [ -z "${RINGER_SAFE_AGY_COPY_PATHS+x}" ]; then
+  RINGER_SAFE_AGY_COPY_PATHS="$DEFAULT_AGY_COPY_PATHS"
+fi
+export RINGER_SAFE_AGY_COPY_PATHS
 
 copy_agy_subset() {
   local rel dest src

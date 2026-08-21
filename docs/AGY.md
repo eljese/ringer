@@ -7,6 +7,10 @@ block in `config.sample.toml` that runs `agy` as a Ringer worker.
 
 1. Install `agy` (see vendor docs).
 2. Run `agy` interactively once to complete browser-based auth.
+   Isolated `bin/ringer-safe-run` seeds
+   `~/.gemini/antigravity-cli/antigravity-oauth-token` (not
+   `~/.gemini/antigravity-oauth-token`) plus `oauth_creds.json` and
+   `google_accounts.json`. It does not copy the rest of `~/.gemini`.
 3. Verify what models your account can reach:
    ```bash
    agy models
