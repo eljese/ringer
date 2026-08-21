@@ -65,7 +65,9 @@ class AgyConfigTests(unittest.TestCase):
 
     def test_sample_command_uses_add_dir_taskdir(self) -> None:
         template = _load_commented_agy_block()["args_template"]
-        self.assertIn(("--add-dir", "{taskdir}"), set(zip(template, template[1:])))
+        pairs = set(zip(template, template[1:]))
+        self.assertIn(("--add-dir", "{workdir}"), pairs)
+        self.assertIn(("--add-dir", "{taskdir}"), pairs)
 
     def test_sample_command_uses_model_placeholder(self) -> None:
         template = _load_commented_agy_block()["args_template"]

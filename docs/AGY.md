@@ -33,12 +33,15 @@ mode that exits cleanly without a TTY. Verified with:
 agy -p "Reply with exactly: agy-headless-ok" < /dev/null   # exits 0, prints agy-headless-ok
 ```
 
-Use `--add-dir {taskdir}` to scope filesystem writes to that directory. The
-flags break down as:
+Use `--add-dir {workdir}` and `--add-dir {taskdir}` so AGY can read the
+candidate tree (workdir) and still write outputs into the task leaf.
+`--add-dir` is repeatable. The flags break down as:
 
-- `--add-dir <dir>` (repeatable): scopes the agent's write tools to `<dir>`
-  and treats it as the workspace anchor — files end up under `<dir>`.
-  **This is what you want for Ringer file-creation tasks.**
+- `--add-dir <dir>` (repeatable): scopes the agent's tools to `<dir>`
+  and treats it as a workspace anchor. Ringer allows the taskdir and,
+  when it is an ancestor, the manifest workdir. Extra paths such as `/`
+  are still rejected.
+  **This is what you want for Ringer file-creation and review tasks.**
 - `--project <id>`: a project-ID token in agy 1.1.13; does NOT pin
   filesystem writes. Naming the bug: the issue body recommended
   `--project {taskdir}`, which agy accepted but treated as a project
