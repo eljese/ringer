@@ -10629,7 +10629,14 @@ class RingerRunner:
                         f"{source.name} was not copied because it is a symlink."
                     )
                     continue
-                if not path_is_contained(source, runtime.taskdir) and not source.is_absolute():
+                escaped = not path_is_contained(source, runtime.taskdir)
+                declared = Path(str(expect_path)).expanduser()
+                declared_absolute = declared.is_absolute() or str(expect_path).startswith("~")
+                # Relative expect_files are always absolute once joined to
+                # taskdir, so is_absolute() cannot be the escape signal.
+                # Isolated runs never harvest outside the taskdir. Legacy
+                # runs still copy operator-declared absolute/~ paths.
+                if escaped and (self.config.runtime_root is not None or not declared_absolute):
                     notes.append(
                         f"{source.name} was not copied because it escapes the task directory."
                     )

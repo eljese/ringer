@@ -375,12 +375,13 @@ def validate_manifest(path: Path) -> None:
 
     for key in ("artifact_dir", "runtime", "outdir", "output"):
         raw = data.get(key)
-        if isinstance(raw, str) and raw.startswith("/"):
-            output = Path(raw)
-            if runtime_roots and not contained_in_any(output, artifact_roots + runtime_roots):
-                fail(f"{key} is outside approved runtime/artifact roots")
-            if contained(output, ringer_root):
-                fail(f"{key} must not be inside the Ringer source repository")
+        if isinstance(raw, str) and raw.strip():
+            output = Path(raw).expanduser()
+            if output.is_absolute() or raw.startswith("~"):
+                if runtime_roots and not contained_in_any(output, artifact_roots + runtime_roots):
+                    fail(f"{key} is outside approved runtime/artifact roots")
+                if contained(output, ringer_root):
+                    fail(f"{key} must not be inside the Ringer source repository")
 
 
 def build_parser() -> argparse.ArgumentParser:

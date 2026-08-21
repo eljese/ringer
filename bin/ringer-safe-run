@@ -88,6 +88,12 @@ if [ ! -f "$CONFIG" ]; then
   exit 2
 fi
 
+if [ ! -f "$MANIFEST" ]; then
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "manifest not found" >&2
+  exit 2
+fi
+
 if ! command -v realpath >/dev/null 2>&1; then
   echo "PREFLIGHT_FAILURE" >&2
   echo "realpath is required on this host" >&2

@@ -936,6 +936,21 @@ class SafeManifestTests(IsolationTestCase):
             validator.validate_manifest(path)
         self.assertIn("absolute output path", caught.exception.message)
 
+    def test_safe_manifest_rejects_tilde_output_dir(self) -> None:
+        runtime = self.root / "rt"
+        runtime.mkdir()
+        os.environ["RINGER_SAFE_RUNTIME_ROOTS"] = str(runtime)
+        path = self.write_manifest(
+            "tilde-out.json",
+            self.base_manifest(
+                workdir=str(runtime / "work"),
+                artifact_dir="~/escaped-artifacts",
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("outside approved", caught.exception.message)
+
     def test_safe_manifest_rejects_absolute_expect_files(self) -> None:
         path = self.write_manifest(
             "abs.json",
@@ -1103,6 +1118,37 @@ class IntegrationIsolationTests(IsolationTestCase):
         created = {path for path in after - before if "__pycache__" not in path.parts}
         self.assertEqual(created, set())
 
+    def test_isolated_harvest_skips_absolute_escape(self) -> None:
+        runtime_root = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime_root)
+        workdir = self.root / "work"
+        manifest = ringer.Manifest.from_obj(
+            {
+                "run_name": "harvest-escape",
+                "workdir": str(workdir),
+                "max_parallel": 1,
+                "tasks": [
+                    {
+                        "key": "task-one",
+                        "engine": "mock",
+                        "spec": "noop",
+                        "check": "test -f hello.txt",
+                        "expect_files": ["/etc/passwd", "hello.txt"],
+                    }
+                ],
+            }
+        )
+        runner = ringer.RingerRunner(manifest, config, "iso-test", dashboard_enabled=False)
+        runtime = runner.runtimes[0]
+        runtime.taskdir.mkdir(parents=True)
+        (runtime.taskdir / "hello.txt").write_text("ok\n", encoding="utf-8")
+        runtime.log_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime.log_path.write_text("log\n", encoding="utf-8")
+        runner._harvest_deliverables_on_pass(runtime)
+        names = [item["name"] for item in runtime.deliverables]
+        self.assertEqual(names, ["hello.txt"])
+        self.assertTrue(any("escapes" in note for note in runtime.deliverable_notes))
+
     def test_unwritable_real_home_does_not_break_isolated_run(self) -> None:
         fake_home = self.root / "unwritable-home"
         fake_home.mkdir()
@@ -1211,6 +1257,25 @@ class SafeRunWrapperTests(IsolationTestCase):
     def test_safe_config_full_access_args_empty(self) -> None:
         data = tomllib.loads((ROOT / "config.safe.toml").read_text(encoding="utf-8"))
         self.assertEqual(data["engines"]["agy"]["full_access_args"], [])
+
+    def test_wrapper_missing_manifest_prints_preflight_failure(self) -> None:
+        result = subprocess.run(
+            [
+                str(ROOT / "bin" / "ringer-safe-run"),
+                "--manifest",
+                str(self.root / "missing.json"),
+                "--identity",
+                "iso-test",
+            ],
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PREFLIGHT_FAILURE", result.stdout)
 
     def test_wrapper_rejects_manifest_outside_allowlist(self) -> None:
         manifest = self.root / "outside.json"
