@@ -21,9 +21,9 @@ Never change `allow_full_access` to true to recover from HOME, XDG,
 socket, dashboard, artifact, or state-path failures.
 
 If the safe runner reports `NETWORK_SANDBOX`, `HOME_ISOLATION_FAILURE`,
-`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, or `PREFLIGHT_FAILURE`,
-stop and report the infrastructure failure. Do not retry by weakening
-permissions.
+`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, `PREFLIGHT_FAILURE`, or
+`CLEANUP_FAILURE`, stop and report the infrastructure failure. Do not retry
+by weakening permissions.
 
 ## Precedence
 
@@ -154,10 +154,11 @@ It:
 3. creates a `0700` runtime with `mktemp` outside the checkout;
 4. exports `RINGER_RUNTIME_ROOT`, `RINGER_SAFE_ENFORCE=1`, and an isolated
    host `HOME`/`XDG`/`TMPDIR`;
-5. copies only paths listed in `RINGER_SAFE_AGY_COPY_PATHS` (default:
-   nothing — never the whole `~/.gemini` tree) into the host-home, then
-   exports `RINGER_SAFE_SEED_HOME` so each worker HOME is seeded from
-   that host-home rather than the real home;
+5. copies only paths listed in `RINGER_SAFE_AGY_COPY_PATHS` (unset
+   default: the three AGY oauth files — never the whole `~/.gemini`
+   tree) into the host-home, then exports `RINGER_SAFE_SEED_HOME` so
+   each worker HOME is seeded from that host-home rather than the real
+   home; an EXIT trap later scrubs those copies;
 6. runs `ringer.py preflight` then `ringer.py run --no-dashboard`
    `--no-self-update` with `config.safe.toml`;
 7. never sets `allow_full_access` and never adds
@@ -205,18 +206,29 @@ trees are diagnostics; do not store long-lived credentials there.
 
 ## Failed-run artifacts
 
-On failure the wrapper prints the runtime path and leaves the tree in
-place. Inspect:
+An EXIT/INT/TERM trap scrubs seeded authentication files from
+`host-home`, `engine-homes`, and any other copied-auth destination on
+every exit, including success, validator/preflight/worker failure,
+SIGINT, and SIGTERM. `--keep-runtime` may retain the diagnostic tree;
+it never retains authentication material. `RINGER_SAFE_CLEAN_SUCCESS` is
+not required for credential-safe cleanup and is ignored.
+
+Cleanup refuses empty, non-canonical, symlink, or out-of-parent runtime
+paths and never follows symlinks. A cleanup failure prints
+`CLEANUP_FAILURE` and the retained runtime path, never credential
+contents, and exits non-zero on an otherwise successful run.
+
+On failure the wrapper prints the runtime path and leaves diagnostics
+in place after scrubbing auth. Inspect:
 
 - `<runtime>/runs/*.json`
 - `<runtime>/runs.jsonl`
 - `<runtime>/artifacts/`
 - the task workdir (`worker.log`)
 
-On success the runtime is retained by default. Set
-`RINGER_SAFE_CLEAN_SUCCESS=1` to drop ephemeral `tmp` / `engine-homes` /
-`work` / `host-home` after copying artifacts to `RINGER_SAFE_REPORT_DIR`
-when that is set.
+On success the wrapper copies artifacts to `RINGER_SAFE_REPORT_DIR`
+when that is set, then drops ephemeral `tmp` / `engine-homes` /
+`work` / `host-home`. State, logs, artifacts, and reports remain.
 
 ## Allowed roots
 

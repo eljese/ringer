@@ -1370,7 +1370,10 @@ class SafeRunWrapperTests(IsolationTestCase):
         env["RINGER_SAFE_MANIFEST_ROOTS"] = str(allowed)
         env["RINGER_SAFE_ALLOWED_ENGINES"] = "mock"
         env["RINGER_SAFE_CONFIG"] = str(config)
+        env["RINGER_SAFE_RUNTIME_PARENT"] = str(self.root / "runtimes")
+        (self.root / "runtimes").mkdir()
         env.pop("RINGER_SAFE_AGY_COPY_PATHS", None)
+        env.pop("RINGER_SAFE_CLEAN_SUCCESS", None)
         env["RINGER_NO_SELF_UPDATE"] = "1"
         result = subprocess.run(
             [
@@ -1395,9 +1398,19 @@ class SafeRunWrapperTests(IsolationTestCase):
         ]
         self.assertTrue(runtime_line, result.stdout)
         runtime = Path(runtime_line[-1].split("=", 1)[1])
-        seeded = list(runtime.glob("engine-homes/**/.gemini/antigravity-cli/antigravity-oauth-token"))
-        self.assertTrue(seeded, result.stdout)
-        self.assertEqual(seeded[0].read_text(encoding="utf-8"), "fake-token\n")
+        self.assertTrue((runtime / "host-home").is_dir(), result.stdout)
+        self.assertTrue((runtime / "engine-homes").is_dir(), result.stdout)
+        leftover = [
+            path
+            for path in runtime.rglob("*")
+            if path.name
+            in {
+                "antigravity-oauth-token",
+                "oauth_creds.json",
+                "google_accounts.json",
+            }
+        ]
+        self.assertEqual([], leftover)
 
     def test_wrapper_rejects_cli_config_override(self) -> None:
         result = subprocess.run(

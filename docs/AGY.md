@@ -134,9 +134,9 @@ Never change `allow_full_access` to true to recover from HOME, XDG,
 socket, dashboard, artifact, or state-path failures.
 
 If the safe runner reports `NETWORK_SANDBOX`, `HOME_ISOLATION_FAILURE`,
-`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, or `PREFLIGHT_FAILURE`,
-stop and report the infrastructure failure. Do not retry by weakening
-permissions.
+`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, `PREFLIGHT_FAILURE`, or
+`CLEANUP_FAILURE`, stop and report the infrastructure failure. Do not retry
+by weakening permissions.
 
 See `docs/runtime-isolation.md` for precedence, path containment, engine
 env templates, and the safe-run contract. `ringer.py --runtime-root` is
