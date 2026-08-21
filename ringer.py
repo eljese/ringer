@@ -194,6 +194,8 @@ DEFAULT_SAFE_AGY_COPY_PATHS = (
     ".gemini/oauth_creds.json",
     ".gemini/google_accounts.json",
 )
+# OpenCode MiniMax / provider tokens only. Never copy opencode.db.
+DEFAULT_SAFE_OPENCODE_COPY_PATHS = (".local/share/opencode/auth.json",)
 LIFECYCLE_OWNERSHIP_MARKER = ".ringer-lifecycle.json"
 LIFECYCLE_REPORT_NAMES = frozenset(
     {"report.md", "report.html", "fix-summary.md", "notes.md"}
@@ -1950,9 +1952,15 @@ def _safe_copy_path_entries(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(os.pathsep) if part.strip()]
 
 
+def credential_copy_rels() -> tuple[str, ...]:
+    if SAFE_AGY_COPY_PATHS_ENV in os.environ:
+        return tuple(_safe_copy_path_entries(os.environ.get(SAFE_AGY_COPY_PATHS_ENV, "")))
+    return DEFAULT_SAFE_AGY_COPY_PATHS + DEFAULT_SAFE_OPENCODE_COPY_PATHS
+
+
 def seed_agy_copy_paths_into_home(worker_home: Path) -> None:
-    raw = os.environ.get(SAFE_AGY_COPY_PATHS_ENV, "").strip()
-    if not raw:
+    rels = credential_copy_rels()
+    if not rels:
         return
     seed_raw = os.environ.get(SAFE_SEED_HOME_ENV, "").strip()
     if seed_raw:
@@ -1969,7 +1977,7 @@ def seed_agy_copy_paths_into_home(worker_home: Path) -> None:
             "HOME_ISOLATION_FAILURE",
             f"cannot resolve worker HOME {worker_home}: {exc}",
         ) from exc
-    for rel in _safe_copy_path_entries(raw):
+    for rel in rels:
         if rel.startswith("/") or rel.startswith("~") or ".." in Path(rel).parts:
             raise RuntimeIsolationError(
                 "PREFLIGHT_FAILURE",
@@ -2061,6 +2069,8 @@ def build_worker_env(
     task_key: str,
     taskdir: Path,
     inherited: Mapping[str, str] | None = None,
+    workdir: Path | None = None,
+    extra_bind_dirs: tuple[Path, ...] = (),
 ) -> dict[str, str] | None:
     """Build the worker environment.
 
@@ -2071,8 +2081,15 @@ def build_worker_env(
     is off).
     """
     isolation_active = config.runtime_root is not None
+    binds = _opencode_extra_bind_dirs(
+        taskdir=taskdir, workdir=workdir, extra_bind_dirs=extra_bind_dirs
+    )
     if not isolation_active and not engine.env:
-        return None
+        if not binds:
+            return None
+        env = dict(inherited if inherited is not None else os.environ)
+        env["RINGER_OPENCODE_EXTRA_BINDS"] = ":".join(binds)
+        return env
     env = dict(inherited if inherited is not None else os.environ)
     if isolation_active:
         for name in INJECTION_ENV_VARS:
@@ -2109,7 +2126,51 @@ def build_worker_env(
             env[name] = str(prepare_engine_env_directory(name, resolved))
         else:
             env[name] = expanded
+    if binds:
+        env["RINGER_OPENCODE_EXTRA_BINDS"] = ":".join(binds)
     return env
+
+
+def _opencode_extra_bind_dirs(
+    *,
+    taskdir: Path,
+    workdir: Path | None,
+    extra_bind_dirs: tuple[Path, ...],
+) -> list[str]:
+    seen: set[Path] = set()
+    ordered: list[str] = []
+    try:
+        task_root = taskdir.expanduser().resolve()
+    except OSError:
+        task_root = taskdir
+    seen.add(task_root)
+    forbidden: set[Path] = {Path("/"), Path("/home"), Path("/tmp")}
+    for raw_forbidden in list(forbidden):
+        try:
+            forbidden.add(raw_forbidden.resolve())
+        except OSError:
+            continue
+    candidates: list[Path] = []
+    if workdir is not None:
+        candidates.append(workdir)
+    candidates.extend(extra_bind_dirs)
+    for raw in candidates:
+        try:
+            path = raw.expanduser().resolve()
+        except OSError:
+            continue
+        if path in seen or path in forbidden:
+            continue
+        if not path.is_dir():
+            continue
+        try:
+            if task_root == path or task_root.is_relative_to(path):
+                continue
+        except (ValueError, OSError):
+            pass
+        seen.add(path)
+        ordered.append(str(path))
+    return ordered
 
 
 def collect_runtime_owned_paths(config: AppConfig) -> dict[str, Path]:
@@ -2475,12 +2536,17 @@ def isolation_preflight(
             if engine is None:
                 continue
             taskdir = manifest.workdir / task.key
+            extra_binds: tuple[Path, ...] = ()
+            if manifest.repo is not None:
+                extra_binds = (manifest.repo,)
             build_worker_env(
                 engine,
                 config=config,
                 run_id="_preflight",
                 task_key=task.key,
                 taskdir=taskdir,
+                workdir=manifest.workdir,
+                extra_bind_dirs=extra_binds,
             )
             command = build_worker_command(
                 engine,
@@ -11310,12 +11376,17 @@ class RingerRunner:
         )
         capture = RollingBytes(max_bytes=1_000_000)
         try:
+            extra_binds: tuple[Path, ...] = ()
+            if self.manifest.repo is not None:
+                extra_binds = (self.manifest.repo,)
             worker_env = build_worker_env(
                 engine,
                 config=self.config,
                 run_id=self.run_id,
                 task_key=runtime.task.key,
                 taskdir=runtime.taskdir,
+                workdir=self.manifest.workdir,
+                extra_bind_dirs=extra_binds,
             )
         except RuntimeIsolationError as exc:
             return WorkerResult(

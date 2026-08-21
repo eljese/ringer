@@ -101,12 +101,14 @@ overlaid. Isolated workers drop process-injection variables
 `PYTHONSTARTUP`, `PERL5OPT`, `RUBYOPT`). `PYTHONPATH` is kept so local
 Python workers still import. Secret-valued variables are never printed.
 
-When `RINGER_SAFE_AGY_COPY_PATHS` is set, those relative files are
-copied into each worker HOME from `RINGER_SAFE_SEED_HOME` (fallback:
-the current process `HOME`). The wrapper exports `RINGER_SAFE_SEED_HOME`
-to its isolated host-home after the copy. Sources must be relative,
-must not contain `..`, must not be symlinks, and the destination must
-stay inside the worker HOME. The whole `~/.gemini` tree is never copied.
+When `RINGER_SAFE_AGY_COPY_PATHS` is unset, Ringer seeds the default
+AGY oauth files plus OpenCode `auth.json` into each worker HOME from
+`RINGER_SAFE_SEED_HOME` (fallback: the current process `HOME`). An
+explicit empty value copies nothing. The wrapper exports
+`RINGER_SAFE_SEED_HOME` to its isolated host-home after the copy.
+Sources must be relative, must not contain `..`, must not be
+symlinks, and the destination must stay inside the worker HOME. The
+whole `~/.gemini` tree and `opencode.db` are never copied.
 
 With no runtime root and no `env` table, workers inherit the parent
 environment exactly as before.
@@ -155,10 +157,11 @@ It:
 4. exports `RINGER_RUNTIME_ROOT`, `RINGER_SAFE_ENFORCE=1`, and an isolated
    host `HOME`/`XDG`/`TMPDIR`;
 5. copies only paths listed in `RINGER_SAFE_AGY_COPY_PATHS` (unset
-   default: the three AGY oauth files — never the whole `~/.gemini`
-   tree) into the host-home, then exports `RINGER_SAFE_SEED_HOME` so
-   each worker HOME is seeded from that host-home rather than the real
-   home; an EXIT trap later scrubs those copies;
+   default: the three AGY oauth files plus OpenCode `auth.json` —
+   never the whole `~/.gemini` tree or `opencode.db`) into the
+   host-home, then exports `RINGER_SAFE_SEED_HOME` so each worker HOME
+   is seeded from that host-home rather than the real home; an EXIT
+   trap later scrubs those copies;
 6. runs `ringer.py preflight` then `ringer.py run --no-dashboard`
    `--no-self-update` with `config.safe.toml`;
 7. never sets `allow_full_access` and never adds
@@ -190,11 +193,17 @@ terminal AGY session look unauthenticated: AGY reads
 `~/.gemini/antigravity-oauth-token`). Keyring/D-Bus alone is not enough
 on this host.
 
+Isolated OpenCode workers also receive `.local/share/opencode/auth.json`
+from the seed home. Never copy `opencode.db` or the rest of
+`~/.local/share/opencode`. Do not recover a missing MiniMax session by
+pointing OpenCode at the operator HOME.
+
 When `RINGER_SAFE_AGY_COPY_PATHS` is unset, the wrapper seeds only:
 
 - `.gemini/antigravity-cli/antigravity-oauth-token`
 - `.gemini/oauth_creds.json`
 - `.gemini/google_accounts.json`
+- `.local/share/opencode/auth.json`
 
 Set the variable to empty to copy nothing, or list extra relative files
 under the real home. The wrapper copies those files into the isolated
@@ -203,6 +212,16 @@ from `RINGER_SAFE_SEED_HOME`. Isolated workers inherit the process
 `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` so a session bus still
 works; they do not remap `XDG_RUNTIME_DIR` under engine-home. Failed-run
 trees are diagnostics; do not store long-lived credentials there.
+
+Linux `engines/opencode-sandboxed.sh` mounts `--tmpfs /tmp` on top of
+the host filesystem. A manifest `repo` under `/tmp` then vanishes
+inside bubblewrap. Ringer exports `RINGER_OPENCODE_EXTRA_BINDS` (the
+repo and any workdir that is not the taskdir or an ancestor of it;
+never `/`, `/home`, `/tmp`). The wrapper bind-mounts those paths after
+the tmpfs so they reappear. Binding the workdir ancestor would make
+sibling task dirs writable; the taskdir is already bound. macOS
+Seatbelt does not hide `/tmp`; extra binds are Linux only. This is
+not a reason to point OpenCode `HOME` at the operator home.
 
 ## Failed-run artifacts
 
@@ -242,7 +261,7 @@ when that is set, then drops ephemeral `tmp` / `engine-homes` /
 | `RINGER_SAFE_MAX_PARALLEL` | Parallelism cap | `4` |
 | `RINGER_SAFE_RUNTIME_PARENT` | `mktemp` parent | `$TMPDIR` or `/tmp` |
 | `RINGER_SAFE_CONFIG` | Config passed to Ringer | `<checkout>/config.safe.toml` |
-| `RINGER_SAFE_AGY_COPY_PATHS` | Relative files copied from the real home into host-home and each worker HOME | oauth token, `oauth_creds.json`, `google_accounts.json` (unset = that list; empty = nothing) |
+| `RINGER_SAFE_AGY_COPY_PATHS` | Relative files copied from the real home into host-home and each worker HOME | oauth token, `oauth_creds.json`, `google_accounts.json`, OpenCode `auth.json` (unset = that list; empty = nothing) |
 | `RINGER_SAFE_SEED_HOME` | Source tree for worker HOME seeding | wrapper host-home |
 | `RINGER_SAFE_ENFORCE` | Re-validate the manifest and apply the engine allowlist during preflight | unset (`1` in the wrapper) |
 

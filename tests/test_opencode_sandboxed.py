@@ -66,6 +66,44 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
         self.assertIn("run", args)
         self.assertIn("--auto", args)
 
+    def test_linux_sandbox_binds_extra_dirs_from_env(self) -> None:
+        args_file = self.root / "bwrap-args.txt"
+        extra = self.root / "repo"
+        extra.mkdir()
+        bwrap = self.stubbin / "bwrap"
+        write_executable(
+            bwrap,
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"printf '%s\\n' \"$@\" > '{args_file}'\n",
+        )
+        write_executable(
+            self.stubbin / "opencode",
+            "#!/usr/bin/env bash\nexit 0\n",
+        )
+        env = os.environ.copy()
+        env["PATH"] = f"{self.stubbin}{os.pathsep}{env.get('PATH', '')}"
+        env["RINGER_OPENCODE_BWRAP_BIN"] = str(bwrap)
+        env["RINGER_OPENCODE_EXTRA_BINDS"] = str(extra)
+
+        result = subprocess.run(
+            [str(WRAPPER), str(self.taskdir), "run", "--auto", "noop"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        args = args_file.read_text(encoding="utf-8").splitlines()
+        resolved = str(extra.resolve())
+        self.assertIn(resolved, args)
+        self.assertIn("run", args)
+        self.assertIn("--auto", args)
+        run_at = args.index("run")
+        self.assertLess(args.index("--tmpfs"), args.index(resolved))
+        self.assertNotIn(resolved, args[run_at:])
+
     def test_full_access_switch_skips_bwrap(self) -> None:
         marker = self.root / "opencode-ran.txt"
         write_executable(

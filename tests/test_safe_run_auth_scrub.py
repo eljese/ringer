@@ -20,6 +20,7 @@ OAUTH_NAMES = (
     "antigravity-oauth-token",
     "oauth_creds.json",
     "google_accounts.json",
+    "auth.json",
 )
 
 _ISO_SPEC = importlib.util.spec_from_file_location(
@@ -81,6 +82,9 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         (self.fake_home / ".gemini" / "google_accounts.json").write_text(
             "fake-accounts\n", encoding="utf-8"
         )
+        opencode_auth = self.fake_home / ".local" / "share" / "opencode" / "auth.json"
+        opencode_auth.parent.mkdir(parents=True)
+        opencode_auth.write_text("fake-opencode\n", encoding="utf-8")
         self.record_script = self.root / "record_seed.py"
         self.record_script.write_text(RECORD_SEED_SCRIPT, encoding="utf-8")
         self.marker = self.root / "seeded.txt"
@@ -232,6 +236,9 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         engine = runtime / "engine-homes" / "probe" / "run" / "task" / ".gemini"
         engine.mkdir(parents=True)
         (engine / "google_accounts.json").write_text("fake-accounts\n", encoding="utf-8")
+        oc = runtime / "host-home" / ".local" / "share" / "opencode"
+        oc.mkdir(parents=True)
+        (oc / "auth.json").write_text("fake-opencode\n", encoding="utf-8")
         (runtime / ".ringer-safe-runtime").write_text("ringer-safe-run\n", encoding="utf-8")
         (runtime / "logs").mkdir()
         (runtime / "logs" / "worker.log").write_text("log\n", encoding="utf-8")
@@ -408,6 +415,17 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         self.assertIn("CLEANUP_FAILURE", result.stdout)
         self.assertTrue(secret.is_file())
         self.assertEqual(secret.read_text(encoding="utf-8"), "keep-me\n")
+
+    def test_list_auth_rels_keeps_opencode_auth_when_env_repeats_defaults(self) -> None:
+        env = self.wrapper_env()
+        env["RINGER_SAFE_AGY_COPY_PATHS"] = (
+            ".gemini/antigravity-cli/antigravity-oauth-token:"
+            ".gemini/oauth_creds.json:"
+            ".gemini/google_accounts.json:"
+            ".local/share/opencode/auth.json"
+        )
+        result = self.source_wrapper("list_auth_rels", env=env)
+        self.assertIn(".local/share/opencode/auth.json", result.stdout.splitlines())
 
     def test_cleanup_is_idempotent(self) -> None:
         runtime = self.make_owned_runtime()
