@@ -19,6 +19,14 @@ NUDGE_TEXT = (
     "skill and route it as a manifest — a single task is a one-task manifest. "
     "If the user explicitly asked for inline work, proceed."
 )
+WRAPPER_NUDGE_TEXT = (
+    "Ringer isolation check: launch AGY-backed Ringer only through "
+    "bin/ringer-safe-run. Direct agy or ringer.py from the outer Codex "
+    "sandbox is blocked by policy. Do not set allow_full_access or pass "
+    "--dangerously-skip-permissions. Isolation classes including "
+    "CLEANUP_FAILURE are terminal; do not retry by weakening permissions "
+    "or falling back to agy/ringer.py."
+)
 
 
 class NudgeHookTests(unittest.TestCase):
@@ -66,13 +74,18 @@ class NudgeHookTests(unittest.TestCase):
             "tool_response": {"success": True},
         }
 
-    def assertNudged(self, proc: subprocess.CompletedProcess[str], event_name: str) -> None:
+    def assertNudged(
+        self,
+        proc: subprocess.CompletedProcess[str],
+        event_name: str,
+        text: str = NUDGE_TEXT,
+    ) -> None:
         self.assertEqual(0, proc.returncode)
         data = json.loads(proc.stdout)
         self.assertEqual(
             {
                 "hookEventName": event_name,
-                "additionalContext": NUDGE_TEXT,
+                "additionalContext": text,
             },
             data["hookSpecificOutput"],
         )
@@ -108,8 +121,42 @@ class NudgeHookTests(unittest.TestCase):
         proc = self.run_hook("pre-bash", self.pre_bash_payload("ls -la"))
         self.assertSilent(proc)
 
-    def test_pre_bash_stays_silent_when_command_contains_ringer_py(self) -> None:
+    def test_pre_bash_emits_wrapper_nudge_for_ringer_py(self) -> None:
         proc = self.run_hook("pre-bash", self.pre_bash_payload("python3 ringer.py run manifest.json"))
+        self.assertEqual(
+            WRAPPER_NUDGE_TEXT,
+            json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"],
+        )
+
+    def test_pre_bash_stays_silent_for_test_ringer_py(self) -> None:
+        proc = self.run_hook("pre-bash", self.pre_bash_payload("python3 tests/test_ringer.py"))
+        self.assertSilent(proc)
+
+    def test_pre_bash_stays_silent_for_test_agy_ringer_py(self) -> None:
+        proc = self.run_hook("pre-bash", self.pre_bash_payload("python3 tests/test_agy_ringer.py"))
+        self.assertSilent(proc)
+
+    def test_pre_bash_stays_silent_when_command_contains_ringer_safe_run(self) -> None:
+        proc = self.run_hook(
+            "pre-bash",
+            self.pre_bash_payload(
+                "bin/ringer-safe-run --manifest x.json && python3 ringer.py "
+                "&& agy --sandbox -p x && node probe-simulate.mjs && "
+                "curl https://api.anthropic.com/v1/messages"
+            ),
+        )
+        self.assertSilent(proc)
+
+    def test_pre_bash_emits_wrapper_nudge_for_agy(self) -> None:
+        proc = self.run_hook("pre-bash", self.pre_bash_payload("agy --sandbox -p x"))
+        self.assertNudged(proc, "PreToolUse", WRAPPER_NUDGE_TEXT)
+
+    def test_pre_bash_emits_wrapper_nudge_for_agy_path(self) -> None:
+        proc = self.run_hook("pre-bash", self.pre_bash_payload("/usr/bin/agy -p x"))
+        self.assertNudged(proc, "PreToolUse", WRAPPER_NUDGE_TEXT)
+
+    def test_pre_bash_stays_silent_for_agy_hyphenated_filename(self) -> None:
+        proc = self.run_hook("pre-bash", self.pre_bash_payload("cat agy-smoke.json"))
         self.assertSilent(proc)
 
     def test_pre_bash_stays_silent_when_active_run_has_live_pid(self) -> None:
@@ -150,6 +197,12 @@ class NudgeHookTests(unittest.TestCase):
     def test_malformed_stdin_exits_zero_silently(self) -> None:
         proc = self.run_hook("pre-bash", "{not json")
         self.assertSilent(proc)
+
+    def test_hook_copies_are_byte_identical(self) -> None:
+        self.assertEqual(
+            (ROOT / "hooks" / "ringer_nudge.py").read_bytes(),
+            (ROOT / "plugins" / "ringer" / "hooks" / "ringer_nudge.py").read_bytes(),
+        )
 
 
 if __name__ == "__main__":
