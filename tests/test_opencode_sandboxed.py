@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bubblewrap path")
     def test_linux_sandbox_uses_bwrap_and_binds_taskdir(self) -> None:
         args_file = self.root / "bwrap-args.txt"
         bwrap = self.stubbin / "bwrap"
@@ -66,6 +68,7 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
         self.assertIn("run", args)
         self.assertIn("--auto", args)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bubblewrap path")
     def test_linux_sandbox_binds_extra_dirs_from_env(self) -> None:
         args_file = self.root / "bwrap-args.txt"
         extra = self.root / "repo"
@@ -125,7 +128,10 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(str(self.taskdir), marker.read_text(encoding="utf-8").strip())
+        self.assertEqual(
+            str(self.taskdir.resolve()),
+            str(Path(marker.read_text(encoding="utf-8").strip()).resolve()),
+        )
 
 
 if __name__ == "__main__":
