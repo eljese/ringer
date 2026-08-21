@@ -19,6 +19,8 @@ bin = "agy"
 model_default = "gemini-3.7-flash-high"
 args_template = [
   "--add-dir",
+  "{workdir}",
+  "--add-dir",
   "{taskdir}",
   "--model",
   "{model}",

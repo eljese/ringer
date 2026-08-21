@@ -168,7 +168,9 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # bin = "agy"
 # model_default = "gemini-3.7-flash-high"
 # args_template = [
-#   "--add-dir",            # scopes writes to {taskdir}; not "--project"
+#   "--add-dir",            # workdir is the candidate/review tree
+#   "{workdir}",
+#   "--add-dir",            # taskdir is the write/output leaf
 #   "{taskdir}",
 #   "--model",
 #   "{model}",

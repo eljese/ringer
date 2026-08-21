@@ -2263,10 +2263,34 @@ def _resolve_add_dir_target(raw: str, taskdir: Path) -> Path:
         ) from exc
 
 
+def _allowed_add_dir_targets(taskdir: Path, workdir: Path | None) -> set[Path]:
+    try:
+        allowed = {taskdir.expanduser().resolve()}
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "MANIFEST_POLICY_FAILURE",
+            f"cannot resolve taskdir {taskdir}: {exc}",
+        ) from exc
+    if workdir is None:
+        return allowed
+    try:
+        root = workdir.expanduser().resolve()
+    except OSError as exc:
+        raise RuntimeIsolationError(
+            "MANIFEST_POLICY_FAILURE",
+            f"cannot resolve workdir {workdir}: {exc}",
+        ) from exc
+    task = next(iter(allowed))
+    if root == task or root in task.parents:
+        allowed.add(root)
+    return allowed
+
+
 def inspect_worker_command_flags(
     command: list[str],
     *,
     taskdir: Path | None = None,
+    workdir: Path | None = None,
     engine_name: str = "",
 ) -> None:
     lowered = [part.lower() for part in command]
@@ -2321,15 +2345,16 @@ def inspect_worker_command_flags(
                 "MANIFEST_POLICY_FAILURE",
                 "composed worker command contains extra --add-dir",
             )
+        allowed = _allowed_add_dir_targets(taskdir, workdir)
         try:
-            allowed = taskdir.expanduser().resolve()
+            task_root = taskdir.expanduser().resolve()
         except OSError as exc:
             raise RuntimeIsolationError(
                 "MANIFEST_POLICY_FAILURE",
                 f"cannot resolve taskdir {taskdir}: {exc}",
             ) from exc
-        target = _resolve_add_dir_target(raw_target, allowed)
-        if target != allowed:
+        target = _resolve_add_dir_target(raw_target, task_root)
+        if target not in allowed:
             raise RuntimeIsolationError(
                 "MANIFEST_POLICY_FAILURE",
                 f"composed worker command contains extra --add-dir {raw_target}",
@@ -2460,6 +2485,7 @@ def isolation_preflight(
             command = build_worker_command(
                 engine,
                 taskdir=taskdir,
+                workdir=manifest.workdir,
                 spec=task.spec,
                 full_access=task.full_access,
                 engine_args=task.engine_args,
@@ -2468,6 +2494,7 @@ def isolation_preflight(
             inspect_worker_command_flags(
                 command,
                 taskdir=taskdir,
+                workdir=manifest.workdir,
                 engine_name=task.engine,
             )
         used = {task.engine for task in manifest.tasks}
@@ -11210,6 +11237,7 @@ class RingerRunner:
         cmd = build_worker_command(
             engine,
             taskdir=runtime.taskdir,
+            workdir=self.manifest.workdir,
             spec=spec,
             full_access=runtime.task.full_access,
             engine_args=runtime.task.engine_args,
@@ -11247,6 +11275,7 @@ class RingerRunner:
                     cmd = build_worker_command(
                         engine,
                         taskdir=runtime.taskdir,
+                        workdir=self.manifest.workdir,
                         spec=injected_spec,
                         full_access=runtime.task.full_access,
                         engine_args=runtime.task.engine_args,
@@ -11318,6 +11347,7 @@ class RingerRunner:
                     inspect_worker_command_flags(
                         cmd,
                         taskdir=runtime.taskdir,
+                        workdir=self.manifest.workdir,
                         engine_name=runtime.task.engine,
                     )
                 proc = await asyncio.create_subprocess_exec(*cmd, **spawn_kwargs)
@@ -11749,9 +11779,11 @@ def build_worker_command(
     full_access: bool,
     engine_args: tuple[str, ...] = (),
     model: str = "",
+    workdir: Path | None = None,
 ) -> list[str]:
     access_args = engine.full_access_args if full_access else engine.sandbox_args
     resolved_model = model or engine.model_default
+    workspace = str(workdir) if workdir is not None else str(taskdir)
     command = [engine.bin]
     for item in engine.args_template:
         if item == "{access_args}":
@@ -11772,6 +11804,7 @@ def build_worker_command(
             continue
         command.append(
             item.replace("{taskdir}", str(taskdir))
+            .replace("{workdir}", workspace)
             .replace("{spec}", spec)
             .replace("{model}", resolved_model)
         )
@@ -11792,6 +11825,7 @@ def print_steering_notes(manifest: Manifest, config: AppConfig) -> None:
                     command = build_worker_command(
                         engine,
                         taskdir=(manifest.workdir / task.key).resolve(),
+                        workdir=manifest.workdir,
                         spec=task.spec,
                         full_access=task.full_access,
                         engine_args=task.engine_args,
@@ -12294,6 +12328,7 @@ def dry_run(
             build_worker_command(
                 engine,
                 taskdir=taskdir,
+                workdir=manifest.workdir,
                 spec=task.spec,
                 full_access=task.full_access,
                 engine_args=task.engine_args,

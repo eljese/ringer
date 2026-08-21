@@ -168,7 +168,7 @@ It:
 
 The wrapper runs **outside** the outer Codex sandbox so AGY can bind a
 local loopback socket. AGY itself still runs with `--sandbox` and
-`--add-dir {taskdir}`. The two sandboxes are not the same layer: the
+`--add-dir {workdir}` plus `--add-dir {taskdir}`. The two sandboxes are not the same layer: the
 outer Codex sandbox blocks loopback and the real home; AGY's sandbox is
 the worker filesystem floor.
 

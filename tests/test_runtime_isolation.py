@@ -692,6 +692,64 @@ class PreflightTests(IsolationTestCase):
             )
         self.assertIn("--add-dir", caught.exception.detail)
 
+    def test_build_worker_command_expands_workdir_and_taskdir(self) -> None:
+        workdir = self.root / "review-tree"
+        taskdir = workdir / "review"
+        taskdir.mkdir(parents=True)
+        engine = ringer.EngineConfig(
+            name="agy",
+            bin="agy",
+            args_template=("--add-dir", "{workdir}", "--add-dir", "{taskdir}", "--sandbox", "-p", "{spec}"),
+            sandbox_args=(),
+            full_access_args=(),
+        )
+        command = ringer.build_worker_command(
+            engine,
+            taskdir=taskdir,
+            workdir=workdir,
+            spec="review",
+            full_access=False,
+        )
+        self.assertEqual(
+            command,
+            ["agy", "--add-dir", str(workdir), "--add-dir", str(taskdir), "--sandbox", "-p", "review"],
+        )
+
+    def test_inspect_worker_command_allows_workdir_add_dir(self) -> None:
+        workdir = self.root / "review-tree"
+        taskdir = workdir / "review"
+        taskdir.mkdir(parents=True)
+        ringer.inspect_worker_command_flags(
+            [
+                "agy",
+                "--add-dir",
+                str(workdir),
+                "--add-dir",
+                str(taskdir),
+                "--sandbox",
+                "-p",
+                "x",
+            ],
+            taskdir=taskdir,
+            workdir=workdir,
+            engine_name="agy",
+        )
+
+    def test_inspect_worker_command_rejects_sibling_add_dir(self) -> None:
+        workdir = self.root / "review-tree"
+        taskdir = workdir / "review"
+        sibling = self.root / "other"
+        taskdir.mkdir(parents=True)
+        sibling.mkdir()
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.inspect_worker_command_flags(
+                ["agy", "--add-dir", str(sibling), "--sandbox", "-p", "x"],
+                taskdir=taskdir,
+                workdir=workdir,
+                engine_name="agy",
+            )
+        self.assertIn("--add-dir", caught.exception.detail)
+
     def test_inspect_worker_command_requires_sandbox_for_agy(self) -> None:
         taskdir = self.root / "task-a"
         taskdir.mkdir()
@@ -1269,10 +1327,12 @@ class SafeRunWrapperTests(IsolationTestCase):
         self.assertFalse(data["allow_full_access"])
         self.assertFalse(data["update"]["auto"])
         self.assertIn("--sandbox", data["engines"]["agy"]["args_template"])
-        self.assertIn(("--add-dir", "{taskdir}"), set(zip(
+        pairs = set(zip(
             data["engines"]["agy"]["args_template"],
             data["engines"]["agy"]["args_template"][1:],
-        )))
+        ))
+        self.assertIn(("--add-dir", "{workdir}"), pairs)
+        self.assertIn(("--add-dir", "{taskdir}"), pairs)
 
     def test_safe_config_full_access_args_empty(self) -> None:
         data = tomllib.loads((ROOT / "config.safe.toml").read_text(encoding="utf-8"))
