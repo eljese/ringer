@@ -159,7 +159,11 @@ unlink_auth_path() {
     fail_cleanup "refusing to unlink an empty path"
     return 1
   fi
-  if [ -L "$path" ] || [ -f "$path" ]; then
+  if [ -d "$path" ] && [ ! -L "$path" ]; then
+    fail_cleanup "auth path is a directory; refusing recursive delete"
+    return 1
+  fi
+  if [ -e "$path" ] || [ -L "$path" ]; then
     if ! rm -f -- "$path"; then
       fail_cleanup "failed to unlink auth path"
       return 1
@@ -168,11 +172,6 @@ unlink_auth_path() {
       fail_cleanup "auth path still present after unlink"
       return 1
     fi
-    return 0
-  fi
-  if [ -d "$path" ]; then
-    fail_cleanup "auth path is a directory; refusing recursive delete"
-    return 1
   fi
   return 0
 }
@@ -346,12 +345,14 @@ copy_agy_subset() {
 forward_signal() {
   local sig="$1"
   local code="$2"
-  local start
+  local n=0
   trap '' INT TERM
   pkill -"$sig" -P $$ 2>/dev/null || true
-  start=$SECONDS
-  while pgrep -P $$ >/dev/null 2>&1 && [ $((SECONDS - start)) -lt 5 ]; do
-    wait -n -t 1 2>/dev/null || true
+  while [ "$n" -lt 5 ]; do
+    pgrep -P $$ >/dev/null 2>&1 || break
+    sleep 1
+    wait 2>/dev/null || true
+    n=$((n + 1))
   done
   pkill -KILL -P $$ 2>/dev/null || true
   wait 2>/dev/null || true
