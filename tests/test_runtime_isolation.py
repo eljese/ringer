@@ -2,6 +2,7 @@
 """Runtime-root isolation, engine env, safe-run policy, and preflight."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -1117,6 +1118,25 @@ class IntegrationIsolationTests(IsolationTestCase):
         after = {path.relative_to(ROOT) for path in ROOT.rglob("*") if path.is_file()}
         created = {path for path in after - before if "__pycache__" not in path.parts}
         self.assertEqual(created, set())
+
+    def test_isolated_verify_rejects_absolute_expect_file(self) -> None:
+        workdir = self.root / "work"
+        workdir.mkdir()
+        taskdir = workdir / "task-one"
+        taskdir.mkdir()
+        (taskdir / "hello.txt").write_text("ok\n", encoding="utf-8")
+        task = ringer.TaskSpec(
+            key="task-one",
+            spec="noop",
+            check="test -f hello.txt",
+            engine="mock",
+            expect_files=("/etc/passwd",),
+        )
+        result = asyncio.run(
+            ringer.Verifier().verify(task, taskdir, isolated=True)
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.missing_files, ("/etc/passwd",))
 
     def test_isolated_harvest_skips_absolute_escape(self) -> None:
         runtime_root = self.root / "rr"

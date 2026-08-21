@@ -10276,12 +10276,19 @@ class Verifier:
         taskdir: Path,
         *,
         variables: dict[str, str] | None = None,
+        isolated: bool = False,
     ) -> VerifyResult:
         check_returncode, check_timed_out, output = await self._run_check(
             task.check, taskdir, variables=variables or {}
         )
         missing_files = tuple(
-            rel for rel in task.expect_files if not self._is_nonempty_file(self._expect_file_path(taskdir, rel))
+            rel
+            for rel in task.expect_files
+            if not self._is_nonempty_file(
+                self._expect_file_path(taskdir, rel),
+                taskdir=taskdir,
+                isolated=isolated,
+            )
         )
         ok = not missing_files and not check_timed_out and check_returncode == 0
         if missing_files:
@@ -10304,9 +10311,20 @@ class Verifier:
         )
 
     @staticmethod
-    def _is_nonempty_file(path: Path) -> bool:
+    def _is_nonempty_file(
+        path: Path,
+        *,
+        taskdir: Path | None = None,
+        isolated: bool = False,
+    ) -> bool:
         try:
-            return path.is_file() and path.stat().st_size > 0
+            if isolated and path.is_symlink():
+                return False
+            if not path.is_file() or path.stat().st_size <= 0:
+                return False
+            if isolated and taskdir is not None and not path_is_contained(path, taskdir):
+                return False
+            return True
         except OSError:
             return False
 
@@ -10547,7 +10565,10 @@ class RingerRunner:
                     if worker.tokens is not None:
                         runtime.tokens = (runtime.tokens or 0) + worker.tokens
                 verify = await self.verifier.verify(
-                    runtime.task, runtime.taskdir, variables=variables
+                    runtime.task,
+                    runtime.taskdir,
+                    variables=variables,
+                    isolated=self.config.runtime_root is not None,
                 )
                 verdict = verdict_for(worker, verify)
                 with self.lock:
@@ -12142,7 +12163,9 @@ async def run_baseline(manifest: Manifest, *, config: AppConfig) -> int:
             else:
                 taskdir.mkdir(parents=True, exist_ok=True)
             try:
-                verify = await verifier.verify(task, taskdir)
+                verify = await verifier.verify(
+                    task, taskdir, isolated=runtime_root is not None
+                )
                 status = "pass" if verify.ok else "FAIL"
                 timed_out = ", timed out" if verify.check_timed_out else ""
                 print(
