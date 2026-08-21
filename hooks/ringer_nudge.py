@@ -17,6 +17,16 @@ NUDGE_TEXT = (
     "skill and route it as a manifest — a single task is a one-task manifest. "
     "If the user explicitly asked for inline work, proceed."
 )
+WRAPPER_NUDGE_TEXT = (
+    "Ringer isolation check: launch AGY-backed Ringer only through "
+    "bin/ringer-safe-run. Direct agy or ringer.py from the outer Codex "
+    "sandbox is blocked by policy. Do not set allow_full_access or pass "
+    "--dangerously-skip-permissions. Isolation classes including "
+    "CLEANUP_FAILURE are terminal; do not retry by weakening permissions "
+    "or falling back to agy/ringer.py."
+)
+PRE_BASH_EVENT = "pre-bash"
+PRE_BASH_WRAPPER_EVENT = "pre-bash-wrapper"
 
 PROVIDER_RE = re.compile(
     r"(api\.anthropic\.com|api\.openai\.com|openrouter\.ai|"
@@ -29,6 +39,8 @@ HARNESS_RE = re.compile(
     r"\.(?:mjs|js|ts|py)\b",
     re.IGNORECASE,
 )
+AGY_TOKEN_RE = re.compile(r"(?:^|[\s\"'/])agy(?=$|[\s;|&<>\"'])")
+RINGER_PY_TOKEN_RE = re.compile(r"(?:^|[\s\"'/])ringer\.py(?=$|[\s;|&<>\"'])")
 
 
 def ringer_home() -> Path:
@@ -120,12 +132,12 @@ def claim_dedupe_marker(home: Path, session_id: Any, event: str) -> bool:
     return True
 
 
-def output_nudge(event_name: str) -> None:
+def output_nudge(event_name: str, text: str = NUDGE_TEXT) -> None:
     json.dump(
         {
             "hookSpecificOutput": {
                 "hookEventName": event_name,
-                "additionalContext": NUDGE_TEXT,
+                "additionalContext": text,
             }
         },
         sys.stdout,
@@ -141,14 +153,39 @@ def command_references_active_workdir(command: str, active_runs: dict[str, dict[
     return False
 
 
-def should_nudge_pre_bash(payload: dict[str, Any], home: Path) -> bool:
+def extract_command(payload: dict[str, Any]) -> str | None:
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
-        return False
+        return None
     command = tool_input.get("command")
     if not isinstance(command, str) or not command.strip():
+        return None
+    return command
+
+
+def command_is_direct_agy_or_ringer(command: str) -> bool:
+    return (
+        RINGER_PY_TOKEN_RE.search(command) is not None
+        or AGY_TOKEN_RE.search(command) is not None
+    )
+
+
+def should_nudge_pre_bash_wrapper(payload: dict[str, Any]) -> bool:
+    command = extract_command(payload)
+    if command is None:
         return False
-    if "ringer.py" in command:
+    if "ringer-safe-run" in command:
+        return False
+    return command_is_direct_agy_or_ringer(command)
+
+
+def should_nudge_pre_bash(payload: dict[str, Any], home: Path) -> bool:
+    command = extract_command(payload)
+    if command is None:
+        return False
+    if "ringer-safe-run" in command:
+        return False
+    if command_is_direct_agy_or_ringer(command):
         return False
     if not (PROVIDER_RE.search(command) or HARNESS_RE.search(command)):
         return False
@@ -226,8 +263,14 @@ def run(argv: list[str]) -> int:
     session_id = payload.get("session_id")
 
     if mode == "pre-bash":
-        if should_nudge_pre_bash(payload, home) and claim_dedupe_marker(home, session_id, mode):
-            output_nudge("PreToolUse")
+        if should_nudge_pre_bash_wrapper(payload) and claim_dedupe_marker(
+            home, session_id, PRE_BASH_WRAPPER_EVENT
+        ):
+            output_nudge("PreToolUse", WRAPPER_NUDGE_TEXT)
+        elif should_nudge_pre_bash(payload, home) and claim_dedupe_marker(
+            home, session_id, PRE_BASH_EVENT
+        ):
+            output_nudge("PreToolUse", NUDGE_TEXT)
         return 0
 
     if should_nudge_post_edit(payload, home) and claim_dedupe_marker(home, session_id, mode):

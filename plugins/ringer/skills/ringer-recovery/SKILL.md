@@ -20,6 +20,11 @@ Classify the incident into exactly one primary class before choosing an action:
 - `PROVIDER_QUOTA`: provider quota/rate/credit prevented execution.
 - `PROVIDER_TIMEOUT`: the provider or worker exceeded its bounded timeout.
 - `NETWORK_SANDBOX`: DNS, network, permission, or sandbox boundaries prevented execution.
+- `HOME_ISOLATION_FAILURE`: isolated HOME, XDG, or TMP setup failed.
+- `RUNTIME_PATH_ESCAPE`: a path escaped the isolated runtime boundary.
+- `MANIFEST_POLICY_FAILURE`: the safe-run manifest failed policy validation.
+- `PREFLIGHT_FAILURE`: the safe runner's preflight checks failed.
+- `CLEANUP_FAILURE`: isolated runtime cleanup failed; the runtime is retained.
 - `STALE_WORKTREE`: a previous task-owned worktree blocks setup.
 - `STALE_ARTIFACT`: report/evidence belongs to an earlier attempt or tree.
 - `MISSING_EXPORT`: disposable work exists but no durable patch/artifact was sealed.
@@ -28,6 +33,14 @@ Classify the incident into exactly one primary class before choosing an action:
 - `COORDINATOR_ERROR`: orchestration failed independently of worker correctness.
 
 Infrastructure classes do not count as code-fix failures and must not consume the same retry budget as substantive findings.
+
+## AGY isolation (outer Codex sandbox)
+
+- Run AGY-backed Ringer only through `bin/ringer-safe-run`.
+- Never launch `agy` or `ringer.py` directly from the outer Codex sandbox.
+- Never set `allow_full_access` or `--dangerously-skip-permissions`.
+- If the safe runner reports `NETWORK_SANDBOX`, `HOME_ISOLATION_FAILURE`, `RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, `PREFLIGHT_FAILURE`, or `CLEANUP_FAILURE`, stop; do not retry by weakening permissions or falling back to `agy`/`ringer.py`.
+- If the wrapper cannot run, skip AGY-backed review; do not fall back to `agy` or `ringer.py`.
 
 ## Recovery rules
 

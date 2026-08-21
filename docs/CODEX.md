@@ -57,6 +57,13 @@ To prevent unauthorized shell command execution, Codex does not run hooks automa
 
 See the "Verify Hooks Trust" step in the [Manual verification](#manual-verification) section below for the exact command.
 
+## PreToolUse routing
+
+The plugin `PreToolUse` Bash hook classifies the command and nudges at most once per class per session:
+
+- Skip when the command contains `ringer-safe-run`, even if the same line also names `ringer.py`, `agy`, a harness, or a provider URL.
+- Isolation nudge on a command-token `ringer.py` or `agy` (path/argv0 such as `ringer.py`, `/usr/bin/agy`; not hyphenated names or filenames such as `agy-smoke.json` or `test_ringer.py`).
+- Swarm nudge when the command matches a provider endpoint or harness script and no live Ringer run is active.
 
 ## Manual verification
 
