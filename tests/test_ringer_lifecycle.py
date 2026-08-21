@@ -74,6 +74,7 @@ class RingerLifecycleTests(unittest.TestCase):
         self.assertEqual(lifecycle.classify_failure("worker timed out after 300s", returncode=1), "PROVIDER_TIMEOUT")
         self.assertEqual(lifecycle.classify_failure("Could not resolve host: api.example", returncode=1), "NETWORK_SANDBOX")
         self.assertEqual(lifecycle.classify_failure("check assertion failed", returncode=1), "CHECK_FAILURE")
+        self.assertEqual(lifecycle.classify_failure("CLEANUP_FAILURE runtime retained", returncode=1), "CLEANUP_FAILURE")
 
     def test_review_packet_obeys_byte_budget(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -200,6 +201,7 @@ class RingerRunnerLifecycleTests(unittest.TestCase):
             ("missing export: patch was not sealed", 1, "MISSING_EXPORT"),
             ("expect_files path mismatch outside the worktree", 1, "MANIFEST_PATH_ERROR"),
             ("bad substitution while running /bin/sh", 1, "SHELL_INTERPOLATION"),
+            ("CLEANUP_FAILURE runtime retained at /tmp/ringer-runtime.x", 1, "CLEANUP_FAILURE"),
             ("no specific signal in output", 0, "COORDINATOR_ERROR"),
         ]
         for text, returncode, expected in cases:

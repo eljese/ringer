@@ -37,6 +37,7 @@ FAILURE_CLASSES = (
     "RUNTIME_PATH_ESCAPE",
     "PREFLIGHT_FAILURE",
     "MANIFEST_POLICY_FAILURE",
+    "CLEANUP_FAILURE",
     "STALE_WORKTREE",
     "STALE_ARTIFACT",
     "MISSING_EXPORT",
@@ -119,6 +120,8 @@ def classify_failure(text: str, *, returncode: int | None = None) -> str:
         return "MANIFEST_POLICY_FAILURE"
     if "PREFLIGHT_FAILURE" in text:
         return "PREFLIGHT_FAILURE"
+    if "CLEANUP_FAILURE" in text:
+        return "CLEANUP_FAILURE"
     lower = text.lower()
     if any(token in lower for token in ("quota", "rate limit", "usage limit", "credits exhausted")):
         return "PROVIDER_QUOTA"

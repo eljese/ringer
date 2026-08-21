@@ -47,7 +47,8 @@ Purpose: verify `--runtime-root` containment, isolated engine HOME, and
 
 Verification steps:
 
-1. Run `RINGER_NO_SELF_UPDATE=1 python3 -m unittest tests.test_runtime_isolation -v`.
+1. Run `bash -n bin/ringer-safe-run` and
+   `RINGER_NO_SELF_UPDATE=1 python3 -m unittest tests.test_runtime_isolation tests.test_safe_run_auth_scrub -v`.
 2. Isolated mock run: `RINGER_NO_SELF_UPDATE=1 python3 ./ringer.py --config
    <temp-config> --runtime-root <temp-runtime> run <manifest> --identity
    iso-test --no-dashboard` with engine `mock`. Confirm state lands under

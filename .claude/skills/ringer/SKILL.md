@@ -77,9 +77,9 @@ Never change `allow_full_access` to true to recover from HOME, XDG,
 socket, dashboard, artifact, or state-path failures.
 
 If the safe runner reports `NETWORK_SANDBOX`, `HOME_ISOLATION_FAILURE`,
-`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, or `PREFLIGHT_FAILURE`,
-stop and report the infrastructure failure. Do not retry by weakening
-permissions.
+`RUNTIME_PATH_ESCAPE`, `MANIFEST_POLICY_FAILURE`, `PREFLIGHT_FAILURE`, or
+`CLEANUP_FAILURE`, stop and report the infrastructure failure. Do not retry
+by weakening permissions.
 
 Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
