@@ -135,7 +135,12 @@ stop and report the infrastructure failure. Do not retry by weakening
 permissions.
 
 See `docs/runtime-isolation.md` for precedence, path containment, engine
-env templates, and the safe-run contract.
+env templates, and the safe-run contract. `ringer.py --runtime-root` is
+not equivalent to `bin/ringer-safe-run`: the wrapper re-validates the
+manifest, seeds listed AGY files into each worker HOME, and keeps the
+process HOME on the isolated host-home. Isolation contains writes and
+runtime state; it is not a confidentiality sandbox. Native Ringside.app
+(`hud/src`) is a parked prototype and does not honor `RINGER_RUNTIME_ROOT`.
 
 If you want a sandbox-stricter mode than agy's default `--sandbox` provides, check `agy --help` for any `--sandbox=<profile>` form on your installed version and override the literal flag in `args_template`.
 

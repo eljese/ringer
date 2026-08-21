@@ -10,7 +10,7 @@ set -Eeuo pipefail
 umask 077
 
 usage() {
-  echo "usage: ringer-safe-run --manifest PATH --identity NAME [--config PATH] [--keep-runtime]" >&2
+  echo "usage: ringer-safe-run --manifest PATH --identity NAME [--keep-runtime]" >&2
   exit 64
 }
 
@@ -35,8 +35,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --config)
       [ "$#" -ge 2 ] || usage
-      CONFIG="$2"
-      shift 2
+      echo "MANIFEST_POLICY_FAILURE" >&2
+      echo "pass config via RINGER_SAFE_CONFIG; --config is ignored" >&2
+      exit 2
       ;;
     --keep-runtime)
       KEEP_RUNTIME=1
@@ -102,10 +103,12 @@ is_under() {
 }
 
 manifest_allowed=0
+set -f
 IFS="${RINGER_SAFE_ROOT_SEP:-:}"
 # shellcheck disable=SC2086
 set -- ${RINGER_SAFE_MANIFEST_ROOTS:-}
 unset IFS
+set +f
 if [ "$#" -eq 0 ]; then
   set -- "$RINGER_ROOT/templates" "$RINGER_ROOT/manifests"
 fi
@@ -162,10 +165,12 @@ mkdir -p -- \
 
 copy_agy_subset() {
   local rel dest src
+  set -f
   IFS="${RINGER_SAFE_ROOT_SEP:-:}"
   # shellcheck disable=SC2086
   set -- ${RINGER_SAFE_AGY_COPY_PATHS:-}
   unset IFS
+  set +f
   for rel in "$@"; do
     [ -n "$rel" ] || continue
     case "$rel" in
@@ -197,6 +202,7 @@ export RINGER_RUNTIME_ROOT="$RUNTIME"
 export RINGER_HOME="$RUNTIME"
 export RINGER_NO_SELF_UPDATE=1
 export RINGER_NO_CATALOG_REFRESH=1
+export RINGER_SAFE_ENFORCE=1
 export HOME="$HOST_HOME"
 export XDG_CONFIG_HOME="$HOST_HOME/.config"
 export XDG_CACHE_HOME="$HOST_HOME/.cache"
@@ -213,6 +219,7 @@ if [ "$status" -ne 0 ]; then
 fi
 
 copy_agy_subset
+export RINGER_SAFE_SEED_HOME="$HOST_HOME"
 
 "$PYTHON_BIN" "$RINGER_ROOT/ringer.py" \
   --config "$CONFIG" \

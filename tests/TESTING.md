@@ -37,3 +37,23 @@ Known test-environment constraint:
 - Worker tests mock only the dashboard socket bind because restricted test
   sandboxes can reject local listeners. They assert that the run records a
   dashboard port and enters the artifact library.
+
+## Runtime isolation
+
+Status: tested
+
+Purpose: verify `--runtime-root` containment, isolated engine HOME, and
+`bin/ringer-safe-run` policy.
+
+Verification steps:
+
+1. Run `RINGER_NO_SELF_UPDATE=1 python3 -m unittest tests.test_runtime_isolation -v`.
+2. Isolated mock run: `RINGER_NO_SELF_UPDATE=1 python3 ./ringer.py --config
+   <temp-config> --runtime-root <temp-runtime> run <manifest> --identity
+   iso-test --no-dashboard` with engine `mock`. Confirm state lands under
+   the runtime root, not `~/.ringer`.
+3. Unwritable HOME: chmod `0500` a fake `HOME` and repeat the mock run.
+   The run still passes and writes nothing into that HOME.
+4. Wrapper allowlist: `bin/ringer-safe-run --manifest /tmp/outside.json
+   --identity iso-test` must print `MANIFEST_POLICY_FAILURE` and exit
+   non-zero.

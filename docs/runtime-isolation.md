@@ -96,10 +96,40 @@ AGY_RINGER_SCRATCH_DIR = $HOME/.gemini/antigravity-cli/scratch
 An explicit `env` table may refine those paths. HOME/XDG/TMP templates
 that escape the runtime root are rejected. The process environment is
 copied first (`PATH` and auth/keyring variables stay available) and then
-overlaid. Secret-valued variables are never printed.
+overlaid. Isolated workers drop process-injection variables
+(`LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`, `BASH_ENV`, `ENV`,
+`PYTHONSTARTUP`, `PERL5OPT`, `RUBYOPT`). `PYTHONPATH` is kept so local
+Python workers still import. Secret-valued variables are never printed.
+
+When `RINGER_SAFE_AGY_COPY_PATHS` is set, those relative files are
+copied into each worker HOME from `RINGER_SAFE_SEED_HOME` (fallback:
+the current process `HOME`). The wrapper exports `RINGER_SAFE_SEED_HOME`
+to its isolated host-home after the copy. Sources must be relative,
+must not contain `..`, must not be symlinks, and the destination must
+stay inside the worker HOME. The whole `~/.gemini` tree is never copied.
 
 With no runtime root and no `env` table, workers inherit the parent
 environment exactly as before.
+
+This is write/state containment, not a confidentiality sandbox. A
+worker can still read whatever its engine sandbox allows. Do not treat
+`--runtime-root` as a secret store.
+
+## `ringer.py --runtime-root` is not the wrapper
+
+`--runtime-root` / `RINGER_RUNTIME_ROOT` relocates built-in outputs and
+overlays worker HOME/XDG/TMP. It does **not** run the safe-manifest
+validator unless `RINGER_SAFE_ENFORCE=1`. Process `HOME` may remain the
+real home. Engine allowlisting, workdir policy, and AGY copy seeding
+are wrapper duties (`bin/ringer-safe-run`). Isolated mock tests may use
+custom engines such as `probe` / `marker` / `mock` under `--runtime-root`
+without the wrapper allowlist.
+
+When the CLI sets a runtime root, Ringer also exports process
+`TMPDIR=<runtime-root>/tmp` after creating the layout.
+
+Native Ringside.app (`hud/src`) is a parked prototype and does not honor
+`RINGER_RUNTIME_ROOT`. The Python HUD does.
 
 ## Safe runner
 
@@ -109,15 +139,25 @@ environment exactly as before.
 bin/ringer-safe-run --manifest /path/to/manifest.json --identity grok-build
 ```
 
+Pass an alternate config only via `RINGER_SAFE_CONFIG`. The wrapper
+rejects `--config` so a prefix-allowed invocation cannot swap
+`engines.agy.bin` from the command line. Isolated AGY argv0 must remain
+`agy`. Safe-run checks cannot traverse `..`, redirect, or invoke a
+shell/interpreter. Deliverable harvest refuses symlinks that escape the
+task directory.
+
 It:
 
 1. permits manifests only from `RINGER_SAFE_MANIFEST_ROOTS` (default:
    `<checkout>/templates` and `<checkout>/manifests`);
 2. runs `tools/validate_safe_manifest.py`;
 3. creates a `0700` runtime with `mktemp` outside the checkout;
-4. exports `RINGER_RUNTIME_ROOT` plus an isolated host `HOME`/`XDG`/`TMPDIR`;
+4. exports `RINGER_RUNTIME_ROOT`, `RINGER_SAFE_ENFORCE=1`, and an isolated
+   host `HOME`/`XDG`/`TMPDIR`;
 5. copies only paths listed in `RINGER_SAFE_AGY_COPY_PATHS` (default:
-   nothing — never the whole `~/.gemini` tree);
+   nothing — never the whole `~/.gemini` tree) into the host-home, then
+   exports `RINGER_SAFE_SEED_HOME` so each worker HOME is seeded from
+   that host-home rather than the real home;
 6. runs `ringer.py preflight` then `ringer.py run --no-dashboard`
    `--no-self-update` with `config.safe.toml`;
 7. never sets `allow_full_access` and never adds
@@ -132,19 +172,24 @@ outer Codex sandbox blocks loopback and the real home; AGY's sandbox is
 the worker filesystem floor.
 
 Safe-run manifests may use structured `{"argv": [...]}` checks or a
-conservative shell check that starts with `test`, `[`, or `grep`.
-No-op checks, extra `--add-dir`, absolute `expect_files` outside an
-approved root, and workdirs under sensitive home directories are
-rejected. This is a policy gate for the host wrapper, not a
-hostile-worker jail.
+conservative shell check that starts with `test`, `[`, or `grep` and
+contains no shell metacharacters (`;|&\`$()` , `&&`, `||`, newlines).
+No-op checks, extra `--add-dir` (any case or `--add-dir=` form),
+absolute `expect_files` outside an approved root, and workdirs under
+sensitive home directories are rejected. When `RINGER_SAFE_PROJECT_ROOTS`
+or `RINGER_SAFE_RUNTIME_ROOTS` is set, workdir must sit under those
+roots; there is no implicit `/tmp` workdir allowlist. This is a policy
+gate for the host wrapper, not a hostile-worker jail.
 
 ## Authentication
 
 Do not copy `~/.gemini` into the isolated home. Prefer credentials that
 already exist in the process environment (provider tokens, keyring
 sockets). If a file must be seeded, list a relative path under the real
-home in `RINGER_SAFE_AGY_COPY_PATHS`. Failed-run trees are diagnostics;
-do not store long-lived credentials there.
+home in `RINGER_SAFE_AGY_COPY_PATHS`. The wrapper copies those files
+into the isolated host-home and Ringer seeds the same relative paths
+into each worker HOME from `RINGER_SAFE_SEED_HOME`. Failed-run trees are
+diagnostics; do not store long-lived credentials there.
 
 ## Failed-run artifacts
 
@@ -173,7 +218,9 @@ when that is set.
 | `RINGER_SAFE_MAX_PARALLEL` | Parallelism cap | `4` |
 | `RINGER_SAFE_RUNTIME_PARENT` | `mktemp` parent | `$TMPDIR` or `/tmp` |
 | `RINGER_SAFE_CONFIG` | Config passed to Ringer | `<checkout>/config.safe.toml` |
-| `RINGER_SAFE_AGY_COPY_PATHS` | Relative files copied from the real home | empty |
+| `RINGER_SAFE_AGY_COPY_PATHS` | Relative files copied from the real home into host-home and each worker HOME | empty |
+| `RINGER_SAFE_SEED_HOME` | Source tree for worker HOME seeding | wrapper host-home |
+| `RINGER_SAFE_ENFORCE` | Re-validate the manifest and apply the engine allowlist during preflight | unset (`1` in the wrapper) |
 
 ## Expected invocation
 
@@ -182,3 +229,24 @@ export RINGER_SAFE_MANIFEST_ROOTS=/path/to/orchestrator/manifests
 export RINGER_SAFE_PROJECT_ROOTS=/path/to/target/repo
 bin/ringer-safe-run --manifest /path/to/orchestrator/manifests/review.json --identity grok-build
 ```
+
+## Codex prefix_rule
+
+Allow only the installed wrapper executable. Adapt the path and current
+Codex rule syntax; this is the shape, not a file to paste into this
+repository:
+
+```
+prefix_rule(
+    pattern = [
+        "/absolute/path/to/ringer/bin/ringer-safe-run",
+    ],
+    decision = "allow",
+    justification = "Runs validated manifests through the isolated Ringer host boundary.",
+)
+```
+
+Do not allow generic prefixes: `bash`, `sh`, `python`, `python3`,
+`ringer.py`, `agy`, or the entire Ringer directory. Those let the outer
+sandbox launch AGY without the validator, isolated host-home, or engine
+allowlist. Never edit `~/.codex` rules from Ringer itself.

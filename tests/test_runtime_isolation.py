@@ -52,6 +52,11 @@ class IsolationTestCase(unittest.TestCase):
         os.environ.pop("RINGER_RUNTIME_ROOT", None)
         os.environ.pop("RINGER_HOME", None)
         os.environ.pop("RINGER_CONFIG", None)
+        os.environ.pop("RINGER_SAFE_ENFORCE", None)
+        os.environ.pop("RINGER_SAFE_AGY_COPY_PATHS", None)
+        os.environ.pop("RINGER_SAFE_SEED_HOME", None)
+        os.environ.pop("RINGER_SAFE_ALLOWED_ENGINES", None)
+        os.environ.pop("RINGER_SAFE_MAX_PARALLEL", None)
 
     def empty_config(self) -> Path:
         path = self.root / "empty.toml"
@@ -192,6 +197,18 @@ class RuntimeRootTests(IsolationTestCase):
         loaded = ringer.AppConfig.load(config, runtime_root=runtime)
         self.assertEqual(loaded.state_dir, runtime.resolve())
 
+    def test_runtime_root_rewrites_home_layout_even_when_contained(self) -> None:
+        runtime = self.root / "rr"
+        host_home = runtime / "host-home"
+        host_home.mkdir(parents=True)
+        os.environ["HOME"] = str(host_home)
+        loaded = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        self.assertEqual(loaded.state_dir, runtime.resolve())
+        self.assertEqual(loaded.eval.jsonl_path, runtime.resolve() / "runs.jsonl")
+        self.assertFalse(
+            str(loaded.state_dir).startswith(str(host_home.resolve())),
+        )
+
     def test_runtime_root_overrides_legacy_eval_jsonl_path(self) -> None:
         config = self.root / "config.toml"
         self.write_legacy_config(config)
@@ -285,6 +302,17 @@ class RuntimeRootTests(IsolationTestCase):
         self.assertIsNone(loaded.runtime_root)
         self.assertEqual(loaded.state_dir, (legacy / "state").resolve())
         self.assertEqual(loaded.eval.jsonl_path, (legacy / "runs.jsonl").resolve())
+
+    def test_apply_runtime_root_forces_allow_full_access_false(self) -> None:
+        config = self.root / "open.toml"
+        config.write_text("allow_full_access = true\n", encoding="utf-8")
+        loaded = ringer.AppConfig.load(config, runtime_root=self.root / "rr")
+        self.assertFalse(loaded.allow_full_access)
+
+    def test_runtime_root_rejects_filesystem_root(self) -> None:
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.canonicalize_runtime_root("/")
+        self.assertEqual(caught.exception.classification, "RUNTIME_PATH_ESCAPE")
 
 
 class EngineEnvTests(IsolationTestCase):
@@ -419,6 +447,111 @@ class EngineEnvTests(IsolationTestCase):
         bravo = json.loads((workdir / "bravo" / "env.json").read_text(encoding="utf-8"))
         self.assertNotEqual(alpha["HOME"], bravo["HOME"])
 
+    def test_isolated_worker_env_includes_agy_scratch_dir(self) -> None:
+        overlay = dict(
+            ringer.default_isolated_engine_env(
+                engine_name="agy",
+                runtime_root=Path("/rt"),
+                run_id="run-1",
+                task_key="task-a",
+            )
+        )
+        self.assertEqual(
+            overlay["AGY_RINGER_SCRATCH_DIR"],
+            "/rt/engine-homes/agy/run-1/task-a/.gemini/antigravity-cli/scratch",
+        )
+
+    def test_isolated_worker_env_drops_ld_preload(self) -> None:
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="mock",
+            bin=sys.executable,
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+            inherited={"PATH": "/usr/bin", "LD_PRELOAD": "evil.so", "HOME": "/tmp/x"},
+        )
+        assert env is not None
+        self.assertNotIn("LD_PRELOAD", env)
+
+    def test_isolated_worker_env_preserves_path(self) -> None:
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="mock",
+            bin=sys.executable,
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+            inherited={"PATH": "/custom/bin", "HOME": "/tmp/x"},
+        )
+        assert env is not None
+        self.assertEqual(env["PATH"], "/custom/bin")
+
+    def test_engines_without_env_table_still_get_isolated_home(self) -> None:
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="mock",
+            bin=sys.executable,
+            args_template=("{spec}",),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+        )
+        assert env is not None
+        self.assertTrue(
+            env["HOME"].startswith(str(runtime.resolve() / "engine-homes" / "mock"))
+        )
+
+    def test_worker_home_receives_seeded_agy_file(self) -> None:
+        seed = self.root / "seed-home"
+        rel = Path(".agy-seed") / "token.txt"
+        src = seed / rel
+        src.parent.mkdir(parents=True)
+        src.write_text("seeded\n", encoding="utf-8")
+        os.environ["RINGER_SAFE_AGY_COPY_PATHS"] = str(rel)
+        os.environ["RINGER_SAFE_SEED_HOME"] = str(seed)
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        engine = ringer.EngineConfig(
+            name="agy",
+            bin="agy",
+            args_template=("--sandbox", "-p", "{spec}"),
+            full_access_args=(),
+            sandbox_args=(),
+        )
+        env = ringer.build_worker_env(
+            engine,
+            config=config,
+            run_id="run-1",
+            task_key="task-a",
+            taskdir=self.root / "task-a",
+        )
+        assert env is not None
+        self.assertEqual((Path(env["HOME"]) / rel).read_text(encoding="utf-8"), "seeded\n")
+
 
 class PreflightTests(IsolationTestCase):
     def test_preflight_classifies_blocked_loopback_as_network_sandbox(self) -> None:
@@ -498,6 +631,74 @@ class PreflightTests(IsolationTestCase):
         self.assertIn("RUNTIME_PATH_ESCAPE", result.stdout)
         self.assertFalse(marker.exists())
 
+    def test_unwritable_runtime_root_is_preflight_failure(self) -> None:
+        runtime = self.root / "rr"
+        config = ringer.AppConfig.load(self.empty_config(), runtime_root=runtime)
+        runtime.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        self.addCleanup(lambda: runtime.chmod(stat.S_IRWXU))
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.isolation_preflight(config)
+        self.assertEqual(caught.exception.classification, "PREFLIGHT_FAILURE")
+
+    def test_inspect_worker_command_rejects_extra_add_dir(self) -> None:
+        taskdir = self.root / "task-a"
+        taskdir.mkdir()
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.inspect_worker_command_flags(
+                ["agy", "--add-dir", str(taskdir), "--add-dir", "/", "--sandbox", "-p", "x"],
+                taskdir=taskdir,
+                engine_name="agy",
+            )
+        self.assertIn("--add-dir", caught.exception.detail)
+
+    def test_inspect_worker_command_requires_sandbox_for_agy(self) -> None:
+        taskdir = self.root / "task-a"
+        taskdir.mkdir()
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.inspect_worker_command_flags(
+                ["agy", "--add-dir", str(taskdir), "-p", "x"],
+                taskdir=taskdir,
+                engine_name="agy",
+            )
+        self.assertIn("sandbox", caught.exception.detail.lower())
+
+    def test_inspect_worker_command_requires_agy_argv0(self) -> None:
+        taskdir = self.root / "task-a"
+        taskdir.mkdir()
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.inspect_worker_command_flags(
+                ["/bin/bash", "--sandbox", "--add-dir", str(taskdir), "-p", "x"],
+                taskdir=taskdir,
+                engine_name="agy",
+            )
+        self.assertIn("invoke agy", caught.exception.detail)
+
+    def test_wrapper_enforces_engine_allowlist_via_env(self) -> None:
+        os.environ["RINGER_SAFE_ENFORCE"] = "1"
+        dump = self.write_dump_script()
+        config_path = self.root / "config.toml"
+        self.write_probe_config(config_path, dump)
+        config = ringer.AppConfig.load(config_path, runtime_root=self.root / "rr")
+        manifest = ringer.Manifest.from_obj(
+            {
+                "run_name": "probe-blocked",
+                "workdir": str(self.root / "work"),
+                "max_parallel": 1,
+                "tasks": [
+                    {
+                        "key": "task-a",
+                        "engine": "probe",
+                        "spec": "dump env",
+                        "check": "test -f env.json",
+                    }
+                ],
+            }
+        )
+        with self.assertRaises(ringer.RuntimeIsolationError) as caught:
+            ringer.isolation_preflight(config, manifest=manifest)
+        self.assertEqual(caught.exception.classification, "MANIFEST_POLICY_FAILURE")
+        self.assertIn("not allowlisted", caught.exception.detail)
+
 
 class SafeManifestTests(IsolationTestCase):
     def write_manifest(self, name: str, payload: dict[str, object]) -> Path:
@@ -564,14 +765,31 @@ class SafeManifestTests(IsolationTestCase):
         self.assertIn("not allowlisted", caught.exception.message)
 
     def test_safe_manifest_rejects_repo_outside_allowlist(self) -> None:
-        os.environ["RINGER_SAFE_PROJECT_ROOTS"] = str(self.root / "allowed-repo")
+        allowed = self.root / "allowed-repo"
+        allowed.mkdir()
+        os.environ["RINGER_SAFE_PROJECT_ROOTS"] = str(allowed)
         path = self.write_manifest(
             "repo.json",
-            self.base_manifest(repo=str(self.root / "other-repo")),
+            self.base_manifest(
+                workdir=str(allowed / "work"),
+                repo=str(self.root / "other-repo"),
+            ),
         )
         with self.assertRaises(validator.PolicyError) as caught:
             validator.validate_manifest(path)
         self.assertIn("project roots", caught.exception.message)
+
+    def test_safe_manifest_rejects_workdir_outside_project_roots(self) -> None:
+        allowed = self.root / "allowed-repo"
+        allowed.mkdir()
+        os.environ["RINGER_SAFE_PROJECT_ROOTS"] = str(allowed)
+        path = self.write_manifest(
+            "work.json",
+            self.base_manifest(workdir=str(self.root / "other-work")),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("project/runtime roots", caught.exception.message)
 
     def test_safe_manifest_rejects_path_traversal(self) -> None:
         path = self.write_manifest(
@@ -602,6 +820,44 @@ class SafeManifestTests(IsolationTestCase):
                         "spec": "Review",
                         "check": "test -f report.md",
                         "engine_args": ["--add-dir", "/"],
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("--add-dir", caught.exception.message)
+
+    def test_safe_manifest_rejects_add_dir_equals_form(self) -> None:
+        path = self.write_manifest(
+            "add-dir-eq.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "test -f report.md",
+                        "engine_args": ["--add-dir=/"],
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("--add-dir", caught.exception.message)
+
+    def test_safe_manifest_rejects_add_dir_case_variant(self) -> None:
+        path = self.write_manifest(
+            "add-dir-case.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "test -f report.md",
+                        "engine_args": ["--Add-Dir", "/"],
                     }
                 ]
             ),
@@ -676,6 +932,90 @@ class SafeManifestTests(IsolationTestCase):
         with self.assertRaises(validator.PolicyError) as caught:
             validator.validate_manifest(path)
         self.assertIn("destructive", caught.exception.message)
+
+    def test_safe_manifest_rejects_shell_metacharacters(self) -> None:
+        path = self.write_manifest(
+            "meta.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "test -f report.md; echo extra",
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("metacharacter", caught.exception.message)
+
+    def test_safe_manifest_rejects_relative_traversal_in_check(self) -> None:
+        path = self.write_manifest(
+            "check-trav.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "grep . ../../.ssh/id_rsa",
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("path traversal", caught.exception.message)
+
+    def test_safe_manifest_rejects_redirect_in_check(self) -> None:
+        path = self.write_manifest(
+            "redir.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": "test -f report.md > /tmp/out",
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("metacharacter", caught.exception.message)
+
+    def test_safe_manifest_rejects_non_conservative_argv(self) -> None:
+        path = self.write_manifest(
+            "argv-bash.json",
+            self.base_manifest(
+                tasks=[
+                    {
+                        "key": "review",
+                        "engine": "agy",
+                        "spec": "Review",
+                        "check": {"argv": ["bash", "run.sh"]},
+                    }
+                ]
+            ),
+        )
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("argv checks must use", caught.exception.message)
+
+    def test_safe_manifest_rejects_non_boolean_full_access(self) -> None:
+        path = self.write_manifest("bool.json", self.base_manifest(full_access="yes"))
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("boolean", caught.exception.message)
+
+    def test_safe_manifest_rejects_max_parallel_over_limit(self) -> None:
+        path = self.write_manifest("parallel.json", self.base_manifest(max_parallel=5))
+        with self.assertRaises(validator.PolicyError) as caught:
+            validator.validate_manifest(path)
+        self.assertIn("exceeds limit", caught.exception.message)
 
 
 class IntegrationIsolationTests(IsolationTestCase):
@@ -828,6 +1168,10 @@ class SafeRunWrapperTests(IsolationTestCase):
             data["engines"]["agy"]["args_template"][1:],
         )))
 
+    def test_safe_config_full_access_args_empty(self) -> None:
+        data = tomllib.loads((ROOT / "config.safe.toml").read_text(encoding="utf-8"))
+        self.assertEqual(data["engines"]["agy"]["full_access_args"], [])
+
     def test_wrapper_rejects_manifest_outside_allowlist(self) -> None:
         manifest = self.root / "outside.json"
         manifest.write_text(
@@ -855,6 +1199,27 @@ class SafeRunWrapperTests(IsolationTestCase):
                 str(manifest),
                 "--identity",
                 "iso-test",
+            ],
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("MANIFEST_POLICY_FAILURE", result.stdout)
+
+    def test_wrapper_rejects_cli_config_override(self) -> None:
+        result = subprocess.run(
+            [
+                str(ROOT / "bin" / "ringer-safe-run"),
+                "--manifest",
+                str(self.root / "missing.json"),
+                "--identity",
+                "iso-test",
+                "--config",
+                str(self.root / "evil.toml"),
             ],
             cwd=str(ROOT),
             text=True,

@@ -40,6 +40,10 @@ CONSERVATIVE_SHELL = re.compile(
     r"^(test|\[|grep|egrep|fgrep)\b",
     re.I,
 )
+SHELL_CHECK_METACHARACTERS = frozenset(
+    {";", "|", "&", "`", "$", "(", ")", ">", "<", "*", "?", "\n", "\r"}
+)
+CONSERVATIVE_CHECK_EXES = frozenset({"test", "[", "grep", "egrep", "fgrep"})
 SENSITIVE_HOME_DIRS = (
     ".ssh",
     ".gnupg",
@@ -155,12 +159,13 @@ def inspect_check(task_key: str, check: Any) -> None:
                 f"task {task_key}: shell checks must start with test, [, or grep; "
                 "prefer a structured argv check"
             )
+        if any(ch in check for ch in SHELL_CHECK_METACHARACTERS):
+            fail(
+                f"task {task_key}: shell check contains metacharacters; "
+                "prefer a structured argv check"
+            )
         for token in check.split():
-            candidate = Path(token).expanduser()
-            if (token.startswith("~") or candidate.is_absolute()) and path_under_real_home(
-                candidate
-            ):
-                fail(f"task {task_key}: check path must not sit under the real home")
+            inspect_check_path(task_key, token)
         return
     if isinstance(check, dict):
         extra = set(check) - {"argv"}
@@ -174,16 +179,34 @@ def inspect_check(task_key: str, check: Any) -> None:
             if pattern.search(joined):
                 fail(f"task {task_key}: destructive argv check is forbidden")
         exe = Path(str(argv[0])).name.lower()
+        if exe not in CONSERVATIVE_CHECK_EXES:
+            fail(
+                f"task {task_key}: argv checks must use test, [, or grep; "
+                "do not invoke a shell or interpreter"
+            )
         if exe in {"bash", "sh", "dash", "zsh", "ksh"} and any(
             item in {"-c", "-lc"} for item in argv[1:]
         ):
             fail(f"task {task_key}: shell -c checks are forbidden")
         for item in argv:
-            candidate = Path(item).expanduser()
-            if candidate.is_absolute() and path_under_real_home(candidate):
-                fail(f"task {task_key}: check path must not sit under the real home")
+            inspect_check_path(task_key, item)
         return
     fail(f"task {task_key}: check must be a string or an argv object")
+
+
+def inspect_check_path(task_key: str, token: str) -> None:
+    candidate = Path(token).expanduser()
+    if ".." in Path(token).parts or ".." in candidate.parts:
+        fail(f"task {task_key}: path traversal in check")
+    if (token.startswith("~") or candidate.is_absolute()) and path_under_real_home(
+        candidate
+    ):
+        fail(f"task {task_key}: check path must not sit under the real home")
+
+
+def is_add_dir_flag(item: str) -> bool:
+    lowered = item.lower()
+    return lowered == "--add-dir" or lowered.startswith("--add-dir=")
 
 
 def inspect_flags(task_key: str, values: Iterable[str]) -> None:
@@ -192,9 +215,9 @@ def inspect_flags(task_key: str, values: Iterable[str]) -> None:
         lowered = item.lower()
         if lowered in {flag.lower() for flag in FORBIDDEN_FLAGS}:
             fail(f"task {task_key}: forbidden flag {item}")
-        if item == "--add-dir":
+        if is_add_dir_flag(item):
             fail(f"task {task_key}: extra --add-dir is forbidden")
-        if item == "--sandbox" or lowered.startswith("--sandbox="):
+        if lowered == "--sandbox" or lowered.startswith("--sandbox="):
             target = lowered.split("=", 1)[1] if "=" in lowered else nxt.lower()
             if target in {"off", "none", "disabled"}:
                 fail(f"task {task_key}: sandbox disable is forbidden")
@@ -232,7 +255,7 @@ def path_under_real_home(path: Path) -> bool:
         if resolved.exists():
             resolved = resolved.resolve()
     except OSError:
-        return False
+        return True
     return resolved == home or resolved.is_relative_to(home)
 
 
@@ -268,7 +291,7 @@ def validate_manifest(path: Path) -> None:
     artifact_roots = parse_roots("RINGER_SAFE_ARTIFACT_ROOTS", runtime_roots)
     project_roots = parse_roots("RINGER_SAFE_PROJECT_ROOTS", ())
     if project_roots or runtime_roots:
-        allowed_work = project_roots + runtime_roots + [Path("/tmp")]
+        allowed_work = project_roots + runtime_roots
         if not contained_in_any(workdir, allowed_work):
             fail("workdir is outside the configured project/runtime roots")
     elif path_under_real_home(workdir):
@@ -283,6 +306,8 @@ def validate_manifest(path: Path) -> None:
     if max_parallel <= 0:
         fail("max_parallel must be positive")
 
+    if "full_access" in data and not isinstance(data.get("full_access"), bool):
+        fail("full_access must be a boolean")
     if is_truthy_full_access(data.get("full_access")):
         fail("full_access is forbidden")
 
@@ -322,6 +347,8 @@ def validate_manifest(path: Path) -> None:
         if not isinstance(spec, str) or not spec.strip():
             fail(f"task {key}: spec is required")
         inspect_check(key, task.get("check", ""))
+        if "full_access" in task and not isinstance(task.get("full_access"), bool):
+            fail(f"task {key}: full_access must be a boolean")
         if is_truthy_full_access(task.get("full_access")):
             fail(f"task {key}: full_access is forbidden")
         engine = str(task.get("engine", "codex")).strip()

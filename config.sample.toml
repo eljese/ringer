@@ -189,6 +189,8 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # shell: {runtime_root}, {run_id}, {task_key}, {taskdir}. When isolation is
 # active, Ringer already overlays these directories; an explicit table may
 # refine the layout but cannot escape the runtime root.
+# `ringer.py --runtime-root` is write/state containment, not the host wrapper.
+# AGY review from an outer sandbox must use bin/ringer-safe-run.
 # [engines.agy.env]
 # HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}"
 # XDG_CONFIG_HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}/.config"
