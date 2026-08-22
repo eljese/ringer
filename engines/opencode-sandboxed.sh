@@ -1,18 +1,5 @@
 #!/bin/bash
 # Ringer engine wrapper: run OpenCode under a host sandbox.
-#
-# OpenCode has no OS-level sandbox of its own. This wrapper supplies the real
-# containment: network and reads remain available, while writes are confined
-# to the task directory, a per-run scratch/cache directory, and OpenCode's
-# state/config directories. macOS uses Seatbelt; Linux uses bubblewrap.
-#
-# Usage (as a Ringer engine bin):
-#   opencode-sandboxed.sh <taskdir> [--no-sandbox] <opencode args...>
-#
-# The first argument is the task directory (pass "{taskdir}" first in
-# args_template). "--no-sandbox" as the second argument skips host
-# containment; wire it as full_access_args so Ringer's allow_full_access gate
-# still applies.
 set -euo pipefail
 
 TASKDIR="${1:?usage: opencode-sandboxed.sh <taskdir> [--no-sandbox] <args...>}"
@@ -20,7 +7,6 @@ shift
 SANDBOX=1
 if [ "${1:-}" = "--no-sandbox" ]; then SANDBOX=0; shift; fi
 
-# Resolve opencode without tripping `set -e` (command -v returns nonzero when absent).
 if ! OPENCODE_BIN="$(command -v opencode)" || [ -z "$OPENCODE_BIN" ]; then
   echo "opencode-sandboxed.sh: opencode not found on PATH" >&2
   exit 127
@@ -31,12 +17,46 @@ if [ "$SANDBOX" = "0" ]; then
 fi
 
 TASKDIR_REAL="$(cd "$TASKDIR" && pwd -P)"
-
-# Per-run scratch root — becomes both TMPDIR and XDG_CACHE_HOME for OpenCode.
 SCRATCH="$(cd "$(mktemp -d -t ringer-opencode-scratch.XXXXXX)" && pwd -P)"
 PROFILE="$(mktemp -t ringer-opencode-prof.XXXXXX)"
 cleanup() { rm -rf "$SCRATCH" "$PROFILE"; }
 trap cleanup EXIT
+
+# Resolve OpenCode's writable directories from the active XDG contract. The
+# supervisor and worker must use the same locations; falling back to HOME is
+# only for callers that do not set XDG variables.
+OC_SHARE_RAW="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+OC_STATE_RAW="${XDG_STATE_HOME:-$HOME/.local/state}/opencode"
+OC_CONFIG_RAW="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+
+resolve_writable_dir() {
+  local raw="$1"
+  mkdir -p "$raw"
+  local resolved
+  resolved="$(cd "$raw" && pwd -P)"
+  case "$resolved" in
+    /|/home|/tmp)
+      echo "opencode-sandboxed.sh: refusing broad writable path $resolved" >&2
+      exit 1
+      ;;
+  esac
+  if [ -n "${RINGER_RUNTIME_ROOT:-}" ]; then
+    local runtime
+    runtime="$(cd "$RINGER_RUNTIME_ROOT" && pwd -P)"
+    case "$resolved/" in
+      "$runtime/"*) ;;
+      *)
+        echo "opencode-sandboxed.sh: writable OpenCode path escapes RINGER_RUNTIME_ROOT: $resolved" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  printf '%s\n' "$resolved"
+}
+
+OC_SHARE="$(resolve_writable_dir "$OC_SHARE_RAW")"
+OC_STATE="$(resolve_writable_dir "$OC_STATE_RAW")"
+OC_CONFIG="$(resolve_writable_dir "$OC_CONFIG_RAW")"
 
 export TMPDIR="$SCRATCH"
 export XDG_CACHE_HOME="$SCRATCH/cache"
@@ -48,9 +68,6 @@ case "$(uname -s)" in
       echo "opencode-sandboxed.sh: /usr/bin/sandbox-exec not available." >&2
       exit 1
     fi
-
-    # Paths are passed to the profile via sandbox-exec -D parameters, NOT
-    # interpolated into the profile — task paths cannot inject rules.
     cat > "$PROFILE" <<'SBEOF'
 (version 1)
 (allow default)
@@ -61,20 +78,18 @@ case "$(uname -s)" in
   (subpath (param "OC_SHARE"))
   (subpath (param "OC_STATE"))
   (subpath (param "OC_CONFIG")))
-; /dev is needed for /dev/null, /dev/urandom, etc.
 (allow file-write-data
   (literal "/dev/null")
   (literal "/dev/dtracehelper")
   (literal "/dev/tty"))
 SBEOF
-
     set +e
     /usr/bin/sandbox-exec \
       -D "TASKDIR=$TASKDIR_REAL" \
       -D "SCRATCH=$SCRATCH" \
-      -D "OC_SHARE=$HOME/.local/share/opencode" \
-      -D "OC_STATE=$HOME/.local/state/opencode" \
-      -D "OC_CONFIG=$HOME/.config/opencode" \
+      -D "OC_SHARE=$OC_SHARE" \
+      -D "OC_STATE=$OC_STATE" \
+      -D "OC_CONFIG=$OC_CONFIG" \
       -f "$PROFILE" "$OPENCODE_BIN" "$@" < /dev/null
     status=$?
     set -e
@@ -88,15 +103,6 @@ SBEOF
       exit 1
     fi
 
-    # OpenCode writes logs, its database, and provider state under these
-    # directories. They, the taskdir, scratch, and optional extra binds
-    # (manifest repo after --tmpfs /tmp) are the writable paths in the Linux
-    # mount namespace; the rest of the filesystem is read-only.
-    OC_SHARE="$HOME/.local/share/opencode"
-    OC_STATE="$HOME/.local/state/opencode"
-    OC_CONFIG="$HOME/.config/opencode"
-    mkdir -p "$OC_SHARE" "$OC_STATE" "$OC_CONFIG"
-
     extra_binds=()
     if [ -n "${RINGER_OPENCODE_EXTRA_BINDS:-}" ]; then
       oldifs="${IFS-}"
@@ -105,21 +111,25 @@ SBEOF
       # shellcheck disable=SC2086
       for extra in ${RINGER_OPENCODE_EXTRA_BINDS}; do
         [ -n "$extra" ] || continue
-        case "$extra" in
-          /|/home|/tmp) continue ;;
-        esac
-        if [ ! -d "$extra" ]; then
-          continue
-        fi
+        case "$extra" in /|/home|/tmp) continue ;; esac
+        [ -d "$extra" ] || continue
         extra_real="$(cd "$extra" && pwd -P)"
-        case "$extra_real" in
-          /|/home|/tmp) continue ;;
-        esac
+        case "$extra_real" in /|/home|/tmp) continue ;; esac
         extra_binds+=(--bind "$extra_real" "$extra_real")
       done
       set +f
       IFS="$oldifs"
     fi
+
+    writable_binds=()
+    seen=""
+    for writable in "$OC_SHARE" "$OC_STATE" "$OC_CONFIG"; do
+      case "|$seen|" in
+        *"|$writable|"*) continue ;;
+      esac
+      seen="${seen:+$seen|}$writable"
+      writable_binds+=(--bind "$writable" "$writable")
+    done
 
     set +e
     "$BWRAP_BIN" \
@@ -134,12 +144,13 @@ SBEOF
       --dir "$SCRATCH" \
       --bind "$TASKDIR_REAL" "$TASKDIR_REAL" \
       --bind "$SCRATCH" "$SCRATCH" \
-      --bind "$OC_SHARE" "$OC_SHARE" \
-      --bind "$OC_STATE" "$OC_STATE" \
-      --bind "$OC_CONFIG" "$OC_CONFIG" \
+      "${writable_binds[@]}" \
       "${extra_binds[@]}" \
       --setenv TMPDIR "$SCRATCH" \
       --setenv XDG_CACHE_HOME "$XDG_CACHE_HOME" \
+      --setenv XDG_DATA_HOME "${XDG_DATA_HOME:-$HOME/.local/share}" \
+      --setenv XDG_STATE_HOME "${XDG_STATE_HOME:-$HOME/.local/state}" \
+      --setenv XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-$HOME/.config}" \
       --chdir "$TASKDIR_REAL" \
       "$OPENCODE_BIN" "$@" < /dev/null
     status=$?

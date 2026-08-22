@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Integrated fail-closed PR-train supervisor entrypoint.
-
-This wrapper preserves the hardened supervisor implementation while adding the
-real-run integration boundary that is shared by codex-pr-train:
-
-* one canonical isolated HOME/XDG layout for probes and workers;
-* optional OpenCode credential seeding into that exact layout;
-* attempt-safe expected-file normalization;
-* fail-closed rejection of harness artifacts in candidate patches; and
-* structured progress telemetry that never establishes PASS.
-"""
+"""Integrated fail-closed PR-train supervisor entrypoint."""
 from __future__ import annotations
 
 import argparse
@@ -19,26 +9,14 @@ import shutil
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ringer_pr_train_engine as engine  # noqa: E402
+import ringer_pr_train_guards as guards  # noqa: E402
 import ringer_supervisor_hardened as hardened  # noqa: E402
-
-
-RUNTIME_ARTIFACT_NAMES = frozenset(
-    {
-        "attempt.json",
-        "heartbeat.json",
-        "progress.json",
-        "supervisor-events.jsonl",
-        "supervisor-outcome.json",
-        "supervisor-preflight.json",
-        "worker.log",
-    }
-)
-RUNTIME_ARTIFACT_DIRS = frozenset({".ringer", ".codex-pr-train", ".pr-train-runtime"})
 
 
 class IntegratedSupervisorError(hardened.HardenedSupervisorError):
@@ -156,10 +134,16 @@ def _runtime_layout(source: dict[str, Any], artifact_root: Path) -> RuntimeLayou
 def _normalize_expected_path(raw: str, *, workdir: Path, task_key: str) -> str:
     value = raw.strip()
     if not value:
-        raise IntegratedSupervisorError("MANIFEST_POLICY_FAILURE: expect_files cannot contain blanks")
+        raise IntegratedSupervisorError(
+            "MANIFEST_POLICY_FAILURE: expect_files cannot contain blanks"
+        )
+    if value.startswith("{{TASK_DIR}}/"):
+        guards.normalize_owned_path(
+            value.removeprefix("{{TASK_DIR}}/"), IntegratedSupervisorError
+        )
+        return value
     if "{{" in value:
         return value
-
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         pure = PurePosixPath(value.replace("\\", "/"))
@@ -167,8 +151,10 @@ def _normalize_expected_path(raw: str, *, workdir: Path, task_key: str) -> str:
             raise IntegratedSupervisorError(
                 "MANIFEST_POLICY_FAILURE: relative expect_files cannot escape the task worktree"
             )
-        return "{{TASK_DIR}}/" + str(pure).lstrip("./")
-
+        relative = guards.normalize_owned_path(
+            str(pure).lstrip("./"), IntegratedSupervisorError
+        )
+        return "{{TASK_DIR}}/" + relative
     logical_task_dir = (workdir / task_key).resolve()
     resolved = candidate.resolve()
     if not _inside(resolved, logical_task_dir):
@@ -176,7 +162,9 @@ def _normalize_expected_path(raw: str, *, workdir: Path, task_key: str) -> str:
             "MANIFEST_POLICY_FAILURE: absolute expect_files must be inside the logical task directory"
         )
     relative = resolved.relative_to(logical_task_dir).as_posix()
-    return "{{TASK_DIR}}/" + relative
+    return "{{TASK_DIR}}/" + guards.normalize_owned_path(
+        relative, IntegratedSupervisorError
+    )
 
 
 def normalize_manifest(source: dict[str, Any], *, artifact_root: Path) -> dict[str, Any]:
@@ -187,6 +175,7 @@ def normalize_manifest(source: dict[str, Any], *, artifact_root: Path) -> dict[s
     tasks = normalized.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise IntegratedSupervisorError("manifest tasks must be a non-empty list")
+    policy_by_task: dict[str, list[str]] = {}
     for task in tasks:
         if not isinstance(task, dict) or not str(task.get("key") or "").strip():
             raise IntegratedSupervisorError("every task must be an object with a key")
@@ -196,16 +185,20 @@ def normalize_manifest(source: dict[str, Any], *, artifact_root: Path) -> dict[s
             isinstance(item, str) for item in raw_expected
         ):
             raise IntegratedSupervisorError("expect_files must be a list of strings")
-        task["expect_files"] = [
+        expected = [
             _normalize_expected_path(item, workdir=workdir, task_key=key)
             for item in raw_expected
         ]
-
+        task["expect_files"] = expected
+        policy_by_task[key] = guards.policy_from_task(
+            task, expected, IntegratedSupervisorError
+        )
     layout = _runtime_layout(normalized, artifact_root)
     normalized["runtime_root"] = str(layout.root)
     supervisor = normalized.setdefault("supervisor", {})
     if not isinstance(supervisor, dict):
         raise IntegratedSupervisorError("manifest supervisor must be an object")
+    supervisor["_pr_train_allowed_changed_paths"] = policy_by_task
     seed = supervisor.get("credential_seed")
     if seed is not None and not isinstance(seed, dict):
         raise IntegratedSupervisorError("supervisor.credential_seed must be an object")
@@ -215,6 +208,12 @@ def normalize_manifest(source: dict[str, Any], *, artifact_root: Path) -> dict[s
             raise IntegratedSupervisorError(
                 "PREFLIGHT_FAILURE: credential destination does not match canonical XDG_DATA_HOME"
             )
+    if supervisor.get("provider_probes") and not isinstance(
+        supervisor.get("worker_capability_probes"), dict
+    ):
+        raise IntegratedSupervisorError(
+            "PREFLIGHT_FAILURE: real provider routes require worker_capability_probes"
+        )
     return normalized
 
 
@@ -227,13 +226,13 @@ def _credential_source(supervisor: dict[str, Any]) -> tuple[Path | None, bool]:
     env_source = os.environ.get("OPENCODE_AUTH_SOURCE")
     if env_source:
         return Path(env_source).expanduser().resolve(), required
-
     original_home = Path(os.environ.get("HOME", "~")).expanduser()
     original_data = Path(
         os.environ.get("XDG_DATA_HOME", str(original_home / ".local" / "share"))
     ).expanduser()
     candidates = (
         original_data / "opencode" / "auth.json",
+        original_home / ".local" / "share" / "opencode" / "auth.json",
         original_home / ".config" / "opencode" / "auth.json",
     )
     return next((path.resolve() for path in candidates if path.is_file()), None), required
@@ -260,33 +259,32 @@ def seed_opencode_credentials(
     return layout.opencode_auth
 
 
-def _runtime_artifact(path: str) -> bool:
-    normalized = PurePosixPath(path.replace("\\", "/"))
-    if normalized.name.lower() in RUNTIME_ARTIFACT_NAMES:
-        return True
-    lowered_parts = {part.lower() for part in normalized.parts}
-    return bool(lowered_parts.intersection(RUNTIME_ARTIFACT_DIRS))
-
-
-def assert_candidate_is_source_only(worktree: Path) -> None:
-    changed = hardened.legacy._changed_paths(worktree)
-    contaminated = sorted(path for path in changed if _runtime_artifact(path))
-    if contaminated:
-        raise IntegratedSupervisorError(
-            "RUNTIME_ARTIFACT_CONTAMINATION: candidate contains harness-owned paths: "
-            + ", ".join(contaminated)
-        )
+def assert_candidate_is_source_only(
+    worktree: Path, allowed_changed_paths: tuple[str, ...] | list[str] | None = None
+) -> list[str]:
+    return guards.assert_candidate(
+        worktree, IntegratedSupervisorError, allowed_changed_paths
+    )
 
 
 def _install_runtime_guards(
     progress: ProgressWriter,
+    *,
+    source: dict[str, Any],
+    layout: RuntimeLayout,
+    artifact_root: Path,
 ) -> Callable[[], None]:
     original_export = hardened.lifecycle.export_worktree_patch
     original_emit = hardened.legacy.EventWriter.emit
     original_checks = hardened._run_objective_checks
+    original_worker = hardened.legacy._run_worker
+    original_classify = hardened.lifecycle.classify_failure
+    original_preflight = hardened.preflight
+    policies = guards.policies_by_worktree(source, hardened)
 
     def guarded_export(worktree: Path, *args: Any, **kwargs: Any):
-        assert_candidate_is_source_only(Path(worktree))
+        policy = guards.policy_for(worktree, policies, IntegratedSupervisorError)
+        assert_candidate_is_source_only(worktree, policy)
         return original_export(worktree, *args, **kwargs)
 
     def emit(writer: Any, event_type: str, **payload: Any) -> None:
@@ -305,27 +303,79 @@ def _install_runtime_guards(
             progress.write(state, event_type=event_type, **payload)
 
     def checks(*args: Any, **kwargs: Any):
-        checks_arg = args[0] if args else kwargs.get("checks", [])
-        progress.write(
-            "OBJECTIVE_CHECK_RUNNING",
-            checks_total=len(checks_arg),
-        )
+        cwd = Path(kwargs["cwd"])
+        policy = guards.policy_for(cwd, policies, IntegratedSupervisorError)
+        assert_candidate_is_source_only(cwd, policy)
+        values = args[0] if args else kwargs.get("checks", [])
+        progress.write("OBJECTIVE_CHECK_RUNNING", checks_total=len(values))
         outcomes = original_checks(*args, **kwargs)
+        assert_candidate_is_source_only(cwd, policy)
         progress.write(
-            "REVIEW_PENDING" if outcomes and all(item.status == "pass" for item in outcomes) else "TERMINAL",
+            "REVIEW_PENDING"
+            if outcomes and all(item.status == "pass" for item in outcomes)
+            else "TERMINAL",
             checks_completed=len(outcomes),
-            checks_passed=bool(outcomes) and all(item.status == "pass" for item in outcomes),
+            checks_passed=bool(outcomes)
+            and all(item.status == "pass" for item in outcomes),
         )
         return outcomes
+
+    def worker(*args: Any, **kwargs: Any):
+        try:
+            return original_worker(*args, **kwargs)
+        finally:
+            moved = guards.relocate_inner_artifacts(
+                Path(kwargs["cwd"]),
+                Path(kwargs["log_path"]).parent / "ringer-lifecycle-artifacts",
+                IntegratedSupervisorError,
+            )
+            if moved:
+                progress.write("PROVIDER_RUNNING", relocated_inner_artifacts=moved)
+
+    def classify(text: str, *, returncode: int | None = None) -> str:
+        if engine.engine_error(text) is not None:
+            return engine.ENGINE_RUNTIME_ERROR
+        return original_classify(text, returncode=returncode)
+
+    def preflight(*args: Any, **kwargs: Any):
+        report = original_preflight(*args, **kwargs)
+        supervisor = kwargs["supervisor"]
+        health = dict(report.provider_health)
+        seen: set[str] = set()
+        for route in kwargs["routes"]:
+            key = hardened._route_key(route)
+            if key in seen:
+                continue
+            seen.add(key)
+            probe = engine.validate_probe(
+                supervisor, route, key, IntegratedSupervisorError
+            )
+            capability = engine.run_probe(
+                route,
+                key,
+                probe,
+                runtime_root=layout.root,
+                artifact_root=artifact_root,
+                environment=kwargs["environment"],
+                error_type=IntegratedSupervisorError,
+            )
+            health[key] = {**health.get(key, {}), "worker_capability": capability}
+        return replace(report, provider_health=health)
 
     hardened.lifecycle.export_worktree_patch = guarded_export
     hardened.legacy.EventWriter.emit = emit
     hardened._run_objective_checks = checks
+    hardened.legacy._run_worker = worker
+    hardened.lifecycle.classify_failure = classify
+    hardened.preflight = preflight
 
     def restore() -> None:
         hardened.lifecycle.export_worktree_patch = original_export
         hardened.legacy.EventWriter.emit = original_emit
         hardened._run_objective_checks = original_checks
+        hardened.legacy._run_worker = original_worker
+        hardened.lifecycle.classify_failure = original_classify
+        hardened.preflight = original_preflight
 
     return restore
 
@@ -338,34 +388,38 @@ def command_run(args: argparse.Namespace) -> int:
     layout = _runtime_layout(normalized, artifact_root)
     layout.create()
     seeded = seed_opencode_credentials(normalized, layout)
-
     manifest_dir = layout.root / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
     normalized_manifest = manifest_dir / f"manifest-{uuid.uuid4().hex}.json"
     normalized_manifest.write_text(
-        json.dumps(normalized, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+        json.dumps(normalized, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-
     progress = ProgressWriter(artifact_root / "supervisor-progress.json")
     progress.write(
         "PREFLIGHT_RUNNING",
         source_manifest=str(original_manifest),
         normalized_manifest=str(normalized_manifest),
     )
-    restore = _install_runtime_guards(progress)
+    restore = _install_runtime_guards(
+        progress, source=normalized, layout=layout, artifact_root=artifact_root
+    )
     delegated = argparse.Namespace(**vars(args))
     delegated.manifest = normalized_manifest
+    result = 2
     try:
         result = hardened.command_run(delegated)
+        return result
+    finally:
+        restore()
+        log_paths, combined = engine.collect_logs(layout.root, artifact_root)
+        engine.enrich_outcome(
+            artifact_root, log_paths, combined, hardened.legacy._atomic_json
+        )
         progress.write(
             "TERMINAL",
             exit_code=result,
             canonical_outcome=str(artifact_root / "supervisor-outcome.json"),
         )
-        return result
-    finally:
-        restore()
         if seeded is not None:
             seeded.unlink(missing_ok=True)
 
