@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,12 +19,31 @@ sys.modules[spec.name] = pr_train
 spec.loader.exec_module(pr_train)
 
 
+def init_repository(path: Path) -> None:
+    path.mkdir()
+    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Tests"],
+        check=True,
+    )
+    (path / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "base.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-qm", "base"],
+        check=True,
+    )
+
+
 class PrTrainSupervisorTests(unittest.TestCase):
     def test_delegated_lifecycle_receives_canonical_home_and_xdg(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             repository = root / "repo"
-            repository.mkdir()
+            init_repository(repository)
             workdir = root / "work"
             artifacts = root / "artifacts"
             auth = root / "host-auth.json"
