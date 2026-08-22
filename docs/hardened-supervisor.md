@@ -5,16 +5,19 @@ The legacy `tools/ringer_supervisor.py` remains available for compatibility.
 
 The hardened entrypoint adds five fail-closed invariants:
 
-1. Implementation routes are restricted to the configured implementation role.
-   The default permits only OpenCode models whose model name contains `minimax`.
+1. Implementation routes are fixed to the approved OpenCode/MiniMax role. The
+   manifest cannot widen that policy, add a third route, or duplicate a route.
 2. Every provider attempt receives a new detached worktree at the same source
    `HEAD`. A failed or timed-out provider's working tree is never reused by a
    later provider.
 3. Every repository task declares non-empty `objective_checks`. These checks
    use structured `argv`, run directly under the supervisor and cannot derive
-   PASS from worker-authored report files such as `notes.md`.
-4. The supervisor writes immutable attempt provenance containing the actual
-   engine, model, baseline SHA, worktree, objective results and sealed patch.
+   PASS from worker-authored report files such as `notes.md`, shell/interpreter
+   indirection, symlink aliases, or completion-marker greps.
+4. The supervisor captures the source baseline before inference, rejects
+   worker HEAD movement, and seals the selected patch only after objective
+   checks. Provenance contains the actual engine, model, baseline SHA,
+   candidate HEADs, worktree, objective results and post-check patch hash.
 5. Once `RUN_STARTED` exists, ordinary exceptions and SIGINT/SIGTERM produce an
    atomic `supervisor-outcome.json` and exactly one terminal event. Worker
    process groups are terminated before the supervisor exits.
@@ -33,11 +36,8 @@ The hardened entrypoint adds five fail-closed invariants:
         "timeout_seconds": 900
       }
     ],
-    "allowed_implementation_engines": ["opencode"],
-    "allowed_implementation_model_markers": ["minimax"],
-    "require_inference_probes": true,
     "provider_probes": {
-      "opencode": {
+      "opencode:minimax-coding-plan/minimax-m3": {
         "kind": "inference",
         "argv": [
           "opencode",
@@ -45,7 +45,8 @@ The hardened entrypoint adds five fail-closed invariants:
           "--model",
           "minimax-coding-plan/MiniMax-M3",
           "Return exactly PROBE_OK"
-        ]
+        ],
+        "expected_output": "PROBE_OK"
       }
     }
   },
@@ -55,9 +56,9 @@ The hardened entrypoint adds five fail-closed invariants:
       "engine": "opencode",
       "model": "minimax-coding-plan/MiniMax-M3",
       "spec": "Implement the scoped change.",
-      "check": "true",
+      "check": "python3 -m unittest discover -s tests -v",
       "objective_checks": [
-        {"argv": ["npm", "run", "test:unit"]},
+        {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]},
         {"argv": ["npm", "run", "verify"]}
       ],
       "expect_files": []

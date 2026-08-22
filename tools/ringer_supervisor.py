@@ -450,6 +450,7 @@ def _run_worker(
     attempt: int,
     route: Route,
     log_path: Path,
+    env: dict[str, str] | None = None,
 ) -> tuple[int | None, float, str | None]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -465,6 +466,7 @@ def _run_worker(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            env=env,
         )
         next_heartbeat = started + heartbeat_seconds
         while process.poll() is None:
@@ -525,6 +527,8 @@ def supervise_task(
     supervisor: dict[str, Any],
     event_writer: EventWriter,
     provider_health: dict[str, dict[str, Any]],
+    worker_env: dict[str, str] | None = None,
+    base_ref: str = "HEAD",
 ) -> TaskOutcome:
     key = str(task["key"])
     run_dir = Path(str(source.get("workdir") or ".")).expanduser().resolve()
@@ -537,7 +541,13 @@ def supervise_task(
     if run_dir != task_dir and run_dir not in task_dir.parents:
         raise SupervisorError(f"task key escapes run directory: {key}")
     if repository:
-        lifecycle.ensure_owned_worktree(repository, task_dir, artifact_dir, key)
+        lifecycle.ensure_owned_worktree(
+            repository,
+            task_dir,
+            artifact_dir,
+            key,
+            base_ref=base_ref,
+        )
     else:
         task_dir.mkdir(parents=True, exist_ok=True)
 
@@ -615,6 +625,7 @@ def supervise_task(
             attempt=attempt,
             route=route,
             log_path=log_path,
+            env=worker_env,
         )
         lifecycle.copy_worker_log(task_dir, artifact_dir, attempt)
         expected = _expected_paths(
@@ -691,6 +702,7 @@ def supervise_task(
             task_dir,
             artifact_dir / "worktree.patch",
             source_repo=repository,
+            base_sha=base_ref if base_ref != "HEAD" else None,
         )
         if lifecycle.dirty_paths(task_dir) and patch is None:
             selected = None

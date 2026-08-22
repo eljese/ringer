@@ -192,7 +192,14 @@ def normalize_check(raw: Any, variables: dict[str, str]) -> str:
     return shlex.join([substitute(item, variables) for item in argv])
 
 
-def ensure_owned_worktree(repo: Path, task_dir: Path, artifact_dir: Path, task_key: str) -> None:
+def ensure_owned_worktree(
+    repo: Path,
+    task_dir: Path,
+    artifact_dir: Path,
+    task_key: str,
+    *,
+    base_ref: str = "HEAD",
+) -> None:
     task_dir.parent.mkdir(parents=True, exist_ok=True)
     if task_dir.exists():
         marker = task_dir / OWNERSHIP_MARKER
@@ -208,12 +215,17 @@ def ensure_owned_worktree(repo: Path, task_dir: Path, artifact_dir: Path, task_k
             raise LifecycleError(
                 f"refusing to remove lifecycle-marked non-worktree directory: {task_dir}"
             )
-    result = git(repo, "worktree", "add", "--detach", str(task_dir), "HEAD", check=False)
+    result = git(repo, "worktree", "add", "--detach", str(task_dir), base_ref, check=False)
     if result.returncode != 0:
         raise LifecycleError(f"git worktree add failed for {task_key}: {result.stdout.strip()}")
     atomic_json(
         task_dir / OWNERSHIP_MARKER,
-        {"owner": "ringer-lifecycle", "task": task_key, "source_repo": str(repo)},
+        {
+            "owner": "ringer-lifecycle",
+            "task": task_key,
+            "source_repo": str(repo),
+            "base_ref": base_ref,
+        },
     )
 
 
@@ -244,10 +256,17 @@ def export_worktree_patch(
     target: Path,
     *,
     source_repo: Path | None = None,
+    base_sha: str | None = None,
 ) -> Path | None:
     changed = dirty_paths(worktree)
     pieces: list[bytes] = []
-    base_sha = git(source_repo, "rev-parse", "HEAD", check=False).stdout.strip() if source_repo else ""
+    base_sha = (
+        base_sha
+        if base_sha is not None
+        else git(source_repo, "rev-parse", "HEAD", check=False).stdout.strip()
+        if source_repo
+        else ""
+    )
     worktree_head = git(worktree, "rev-parse", "HEAD", check=False).stdout.strip()
     if base_sha and worktree_head and base_sha != worktree_head:
         committed = subprocess.run(
