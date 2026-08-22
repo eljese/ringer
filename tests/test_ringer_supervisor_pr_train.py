@@ -95,6 +95,11 @@ class PrTrainSupervisorTests(unittest.TestCase):
                     Path(os.environ["OPENCODE_AUTH_SOURCE"]).resolve(),
                     auth.resolve(),
                 )
+                seed_home = runtime / "seed-home"
+                self.assertEqual(os.environ["RINGER_SAFE_SEED_HOME"], str(seed_home))
+                self.assertTrue(
+                    (seed_home / ".local/share/opencode/auth.json").is_file()
+                )
                 return 0
 
             with mock.patch.object(
@@ -103,6 +108,7 @@ class PrTrainSupervisorTests(unittest.TestCase):
                 self.assertEqual(pr_train.command_run(args), 0)
 
             self.assertEqual(os.environ.get("HOME"), original_home)
+            self.assertFalse(any((artifacts / ".pr-train-runtime").rglob("auth.json")))
 
 
 if __name__ == "__main__":
