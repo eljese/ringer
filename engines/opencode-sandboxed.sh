@@ -17,8 +17,20 @@ if [ "$SANDBOX" = "0" ]; then
 fi
 
 TASKDIR_REAL="$(cd "$TASKDIR" && pwd -P)"
-SCRATCH="$(cd "$(mktemp -d -t ringer-opencode-scratch.XXXXXX)" && pwd -P)"
-PROFILE="$(mktemp -t ringer-opencode-prof.XXXXXX)"
+if [ -n "${RINGER_RUNTIME_ROOT:-}" ]; then
+  mkdir -p "$RINGER_RUNTIME_ROOT"
+  RINGER_RUNTIME_ROOT_REAL="$(cd "$RINGER_RUNTIME_ROOT" && pwd -P)"
+  case "$RINGER_RUNTIME_ROOT_REAL" in
+    /|/home|/tmp)
+      echo "opencode-sandboxed.sh: refusing broad RINGER_RUNTIME_ROOT $RINGER_RUNTIME_ROOT_REAL" >&2
+      exit 1
+      ;;
+  esac
+else
+  RINGER_RUNTIME_ROOT_REAL="${TMPDIR:-/tmp}"
+fi
+SCRATCH="$(cd "$(mktemp -d "$RINGER_RUNTIME_ROOT_REAL/ringer-opencode-scratch.XXXXXX")" && pwd -P)"
+PROFILE="$(mktemp "$RINGER_RUNTIME_ROOT_REAL/ringer-opencode-prof.XXXXXX")"
 cleanup() { rm -rf "$SCRATCH" "$PROFILE"; }
 trap cleanup EXIT
 
@@ -41,10 +53,8 @@ resolve_writable_dir() {
       ;;
   esac
   if [ -n "${RINGER_RUNTIME_ROOT:-}" ]; then
-    local runtime
-    runtime="$(cd "$RINGER_RUNTIME_ROOT" && pwd -P)"
     case "$resolved/" in
-      "$runtime/"*) ;;
+      "$RINGER_RUNTIME_ROOT_REAL/"*) ;;
       *)
         echo "opencode-sandboxed.sh: writable OpenCode path escapes RINGER_RUNTIME_ROOT: $resolved" >&2
         exit 1
@@ -103,7 +113,20 @@ SBEOF
       exit 1
     fi
 
-    extra_binds=()
+    bind_args=()
+    seen_bind_targets=("$TASKDIR_REAL" "$SCRATCH")
+    add_bind_once() {
+      local target="$1"
+      local existing
+      for existing in "${seen_bind_targets[@]}"; do
+        if [ "$existing" = "$target" ]; then
+          return
+        fi
+      done
+      seen_bind_targets+=("$target")
+      bind_args+=(--bind "$target" "$target")
+    }
+
     if [ -n "${RINGER_OPENCODE_EXTRA_BINDS:-}" ]; then
       oldifs="${IFS-}"
       IFS="${RINGER_OPENCODE_BIND_SEP:-:}"
@@ -115,20 +138,14 @@ SBEOF
         [ -d "$extra" ] || continue
         extra_real="$(cd "$extra" && pwd -P)"
         case "$extra_real" in /|/home|/tmp) continue ;; esac
-        extra_binds+=(--bind "$extra_real" "$extra_real")
+        add_bind_once "$extra_real"
       done
       set +f
       IFS="$oldifs"
     fi
 
-    writable_binds=()
-    seen=""
     for writable in "$OC_SHARE" "$OC_STATE" "$OC_CONFIG"; do
-      case "|$seen|" in
-        *"|$writable|"*) continue ;;
-      esac
-      seen="${seen:+$seen|}$writable"
-      writable_binds+=(--bind "$writable" "$writable")
+      add_bind_once "$writable"
     done
 
     set +e
@@ -144,8 +161,7 @@ SBEOF
       --dir "$SCRATCH" \
       --bind "$TASKDIR_REAL" "$TASKDIR_REAL" \
       --bind "$SCRATCH" "$SCRATCH" \
-      "${writable_binds[@]}" \
-      "${extra_binds[@]}" \
+      "${bind_args[@]}" \
       --setenv TMPDIR "$SCRATCH" \
       --setenv XDG_CACHE_HOME "$XDG_CACHE_HOME" \
       --setenv XDG_DATA_HOME "${XDG_DATA_HOME:-$HOME/.local/share}" \

@@ -65,7 +65,30 @@ class OpenCodeXdgSandboxTests(unittest.TestCase):
         args = self.args.read_text(encoding="utf-8").splitlines()
         for name in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"):
             expected = str((Path(env[name]) / "opencode").resolve())
-            self.assertGreaterEqual(args.count(expected), 2)
+            self.assertEqual(args.count(expected), 2)
+        for option in ("--setenv",):
+            self.assertIn(option, args)
+        for name in ("TMPDIR", "XDG_CACHE_HOME"):
+            value = args[args.index(name) + 1]
+            self.assertTrue(Path(value).resolve().is_relative_to(self.runtime.resolve()))
+
+    def test_duplicate_xdg_bind_targets_are_bound_once(self) -> None:
+        env = self.env()
+        shared = self.runtime / "shared"
+        env["XDG_DATA_HOME"] = str(shared)
+        env["XDG_STATE_HOME"] = str(shared)
+        env["XDG_CONFIG_HOME"] = str(shared)
+        result = subprocess.run(
+            [str(WRAPPER), str(self.task), "run", "noop"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.args.read_text(encoding="utf-8").splitlines()
+        target = str((shared / "opencode").resolve())
+        self.assertEqual(args.count(target), 2)
 
     def test_xdg_path_outside_runtime_is_rejected(self) -> None:
         env = self.env()

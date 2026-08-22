@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -89,6 +90,14 @@ class CandidateGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(GuardError, "changed symlinks"):
             guards.assert_candidate(linked, GuardError, ["alias.txt"])
 
+        deleted_link = self.worktree("deleted-link")
+        os.symlink("base.txt", deleted_link / "tracked-link.txt")
+        git(deleted_link, "add", "tracked-link.txt")
+        git(deleted_link, "commit", "-qm", "track symlink")
+        (deleted_link / "tracked-link.txt").unlink()
+        with self.assertRaisesRegex(GuardError, "changed symlinks"):
+            guards.assert_candidate(deleted_link, GuardError, ["tracked-link.txt"])
+
     def test_harness_artifact_is_rejected(self) -> None:
         tree = self.worktree("runtime")
         (tree / "attempt.json").write_text("{}\n", encoding="utf-8")
@@ -109,9 +118,13 @@ class CandidateGuardTests(unittest.TestCase):
 
     def test_policy_rejects_escape_and_supports_subtree(self) -> None:
         self.assertEqual(guards.normalize_owned_path("src/**", GuardError), "src/**")
-        for value in ("../escape", "/absolute", ".", "C:/windows"):
+        for value in ("../escape", "/absolute", ".", "C:/windows", "attempt.json"):
             with self.subTest(value=value), self.assertRaises(GuardError):
                 guards.normalize_owned_path(value, GuardError)
+        with self.assertRaisesRegex(GuardError, "duplicates"):
+            guards.policy_from_task(
+                {"allowed_changed_paths": ["src/a.py", "src/a.py"]}, [], GuardError
+            )
 
 
 class EngineEvidenceTests(unittest.TestCase):
@@ -134,6 +147,52 @@ class EngineEvidenceTests(unittest.TestCase):
         self.assertNotIn('"abc"', scrubbed)
         self.assertNotIn('"pw"', scrubbed)
         self.assertIn("err_29dccdf5", scrubbed)
+
+    def test_collect_logs_never_copies_auth_database_or_wal_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runtime = root / "runtime-logs"
+            runtime.mkdir()
+            (runtime / "worker.log").write_text(
+                'Authorization: Bearer secret-value err_29dccdf5\n', encoding="utf-8"
+            )
+            for name in ("auth.json", "state.sqlite", "state.sqlite-wal", "state.sqlite-shm"):
+                (runtime / name).write_text("credential-content\n", encoding="utf-8")
+            artifacts = root / "log-artifacts"
+            copied, combined = engine.collect_logs(runtime, artifacts)
+            self.assertEqual(len(copied), 1)
+            self.assertIn("[REDACTED]", combined)
+            self.assertIn("err_29dccdf5", combined)
+            self.assertFalse(
+                any(path.endswith(("auth.json", "state.sqlite", "-wal", "-shm")) for path in copied)
+            )
+
+    def test_engine_runtime_failure_cannot_retain_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifacts = root / "outcome"
+            artifacts.mkdir()
+            patch = artifacts / "candidate.patch"
+            patch.write_text("secret-value\n", encoding="utf-8")
+            outcome = artifacts / "supervisor-outcome.json"
+            outcome.write_text(
+                '{"status":"fail","tasks":[{"status":"fail",'
+                '"patch_path":"' + str(patch) + '","patch_sha256":"' + "a" * 64 + '",'
+                '"attempts":[{"failure_class":"ENGINE_RUNTIME_ERROR"}]}]}',
+                encoding="utf-8",
+            )
+            engine.enrich_outcome(
+                artifacts,
+                [],
+                'UnknownError Unexpected server error err_29dccdf5',
+                lambda path, payload: path.write_text(
+                    json.dumps(payload), encoding="utf-8"
+                ),
+            )
+            self.assertFalse(patch.exists())
+            self.assertIsNone(
+                json.loads(outcome.read_text())["tasks"][0]["patch_path"]
+            )
 
     def test_capability_probe_requires_wrapper_disposable_dir_and_exact_model(self) -> None:
         route = SimpleNamespace(engine="opencode", model="minimax-coding-plan/MiniMax-M3")

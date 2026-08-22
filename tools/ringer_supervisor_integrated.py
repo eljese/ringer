@@ -410,18 +410,22 @@ def command_run(args: argparse.Namespace) -> int:
         result = hardened.command_run(delegated)
         return result
     finally:
-        restore()
-        log_paths, combined = engine.collect_logs(layout.root, artifact_root)
-        engine.enrich_outcome(
-            artifact_root, log_paths, combined, hardened.legacy._atomic_json
-        )
-        progress.write(
-            "TERMINAL",
-            exit_code=result,
-            canonical_outcome=str(artifact_root / "supervisor-outcome.json"),
-        )
-        if seeded is not None:
-            seeded.unlink(missing_ok=True)
+        try:
+            restore()
+        finally:
+            try:
+                log_paths, combined = engine.collect_logs(layout.root, artifact_root)
+                engine.enrich_outcome(
+                    artifact_root, log_paths, combined, hardened.legacy._atomic_json
+                )
+                progress.write(
+                    "TERMINAL",
+                    exit_code=result,
+                    canonical_outcome=str(artifact_root / "supervisor-outcome.json"),
+                )
+            finally:
+                if seeded is not None:
+                    seeded.unlink(missing_ok=True)
 
 
 def parser() -> argparse.ArgumentParser:

@@ -121,17 +121,17 @@ def run_probe(
             f"PREFLIGHT_FAILURE: capability wrapper cannot be resolved for {route_key}"
         )
     argv[0] = resolved
-    process = subprocess.Popen(
-        argv,
-        cwd=task_dir,
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        text=True,
-    )
     output = ""
     try:
+        process = subprocess.Popen(
+            argv,
+            cwd=task_dir,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            text=True,
+        )
         try:
             output, _ = process.communicate(timeout=probe["timeout_seconds"])
         except subprocess.TimeoutExpired:
@@ -145,7 +145,14 @@ def run_probe(
                 f"PREFLIGHT_FAILURE: sandboxed worker capability probe timed out for {route_key}"
             )
     finally:
-        shutil.rmtree(task_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(task_dir)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise error_type(
+                f"CLEANUP_FAILURE: could not remove capability task directory {task_dir}"
+            ) from error
     log_path = artifact_root / "worker-capability-probes" / (
         route_key.replace(":", "-").replace("/", "-") + ".log"
     )
@@ -194,7 +201,25 @@ def enrich_outcome(artifact_root: Path, log_paths: list[str], combined: str, ato
     payload["engine_logs"] = log_paths
     parsed = engine_error(combined + "\n" + str(payload.get("error") or ""))
     for task in payload.get("tasks") or []:
+        runtime_failure = False
         for attempt in task.get("attempts") or []:
             if attempt.get("failure_class") == ENGINE_RUNTIME_ERROR and parsed:
+                runtime_failure = True
                 attempt["engine_error"] = parsed
+        if runtime_failure:
+            for field in ("patch_path", "patch_sha256", "worker_patch_path", "worker_patch_sha256"):
+                raw_path = task.get(field)
+                if isinstance(raw_path, str):
+                    candidate = Path(raw_path).expanduser()
+                    try:
+                        contained = candidate.resolve().is_relative_to(artifact_root.resolve())
+                    except OSError:
+                        contained = False
+                    if contained:
+                        candidate.unlink(missing_ok=True)
+                task[field] = None
+            task["status"] = "fail"
+            task["failure_class"] = ENGINE_RUNTIME_ERROR
+            task["patch_path"] = None
+            task["patch_sha256"] = None
     atomic_json(path, payload)

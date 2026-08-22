@@ -38,6 +38,8 @@ def normalize_owned_path(raw: str, error_type: type[Exception]) -> str:
         or any(part in {"", ".", ".."} for part in pure.parts)
         or ":" in core
         or "{{" in core
+        or any(part.lower() in RUNTIME_ARTIFACT_DIRS for part in pure.parts)
+        or pure.name.lower() in RUNTIME_ARTIFACT_NAMES
     ):
         raise error_type(
             f"MANIFEST_POLICY_FAILURE: invalid allowed_changed_paths entry {raw!r}"
@@ -59,7 +61,10 @@ def policy_from_task(
         raise error_type(
             "MANIFEST_POLICY_FAILURE: allowed_changed_paths must be a list of strings"
         )
-    return list(dict.fromkeys(normalize_owned_path(item, error_type) for item in raw))
+    normalized = [normalize_owned_path(item, error_type) for item in raw]
+    if len(normalized) != len(set(normalized)):
+        raise error_type("MANIFEST_POLICY_FAILURE: allowed_changed_paths contains duplicates")
+    return normalized
 
 
 def policies_by_worktree(source: dict[str, Any], hardened: Any) -> dict[Path, tuple[str, ...]]:
@@ -150,6 +155,20 @@ def path_allowed(path: str, policy: tuple[str, ...]) -> bool:
     return False
 
 
+def _was_tracked_symlink(worktree: Path, path: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "ls-tree", "-z", "HEAD", "--", path],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        return False
+    return any(record.startswith("120000 blob ") for record in result.stdout.decode(
+        "utf-8", errors="surrogateescape"
+    ).split("\0"))
+
+
 def assert_candidate(
     worktree: Path,
     error_type: type[Exception],
@@ -162,7 +181,11 @@ def assert_candidate(
             "RUNTIME_ARTIFACT_CONTAMINATION: candidate contains harness-owned paths: "
             + ", ".join(contaminated)
         )
-    symlinks = sorted(path for path in changed if (worktree / path).is_symlink())
+    symlinks = sorted(
+        path
+        for path in changed
+        if (worktree / path).is_symlink() or _was_tracked_symlink(worktree, path)
+    )
     if symlinks:
         raise error_type(
             "MANIFEST_POLICY_FAILURE: changed symlinks are not allowed: "

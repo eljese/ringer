@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -170,6 +171,85 @@ class IntegratedSupervisorTests(unittest.TestCase):
             "credential source does not exist",
         ):
             integrated.seed_opencode_credentials(normalized, layout)
+
+    def test_runtime_guards_restore_on_all_command_exit_paths(self) -> None:
+        manifest = self.manifest([])
+        manifest["supervisor"] = {
+            "routes": [{"engine": "opencode", "model": "minimax-coding-plan/MiniMax-M3"}]
+        }
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        guarded_names = (
+            "export_worktree_patch",
+            "emit",
+            "_run_objective_checks",
+            "_run_worker",
+            "classify_failure",
+            "preflight",
+        )
+
+        def args(artifact_dir: Path) -> argparse.Namespace:
+            return argparse.Namespace(
+                manifest=manifest_path,
+                ringer=self.root / "ringer.py",
+                config=None,
+                identity="test",
+                artifact_dir=artifact_dir,
+                cleanup=True,
+            )
+
+        originals = {
+            name: getattr(
+                integrated.hardened.lifecycle
+                if name in {"export_worktree_patch", "classify_failure"}
+                else integrated.hardened.legacy.EventWriter
+                if name == "emit"
+                else integrated.hardened.legacy
+                if name == "_run_worker"
+                else integrated.hardened,
+                name,
+            )
+            for name in guarded_names
+        }
+
+        for index, failure in enumerate((RuntimeError("boom"), KeyboardInterrupt())):
+            with self.subTest(failure=type(failure).__name__):
+                with mock.patch.object(
+                    integrated.hardened, "command_run", side_effect=failure
+                ), mock.patch.object(
+                    integrated.engine, "collect_logs", return_value=([], "")
+                ):
+                    with self.assertRaises(type(failure)):
+                        integrated.command_run(args(self.artifacts / f"case-{index}"))
+                self.assertEqual(
+                    getattr(integrated.hardened.lifecycle, "export_worktree_patch"),
+                    originals["export_worktree_patch"],
+                )
+                self.assertEqual(
+                    integrated.hardened.legacy.EventWriter.emit,
+                    originals["emit"],
+                )
+                self.assertEqual(
+                    integrated.hardened._run_objective_checks,
+                    originals["_run_objective_checks"],
+                )
+                self.assertEqual(
+                    integrated.hardened.legacy._run_worker,
+                    originals["_run_worker"],
+                )
+                self.assertEqual(
+                    integrated.hardened.lifecycle.classify_failure,
+                    originals["classify_failure"],
+                )
+                self.assertEqual(integrated.hardened.preflight, originals["preflight"])
+
+        with mock.patch.object(integrated.hardened, "command_run", return_value=0), mock.patch.object(
+            integrated.engine, "collect_logs", side_effect=OSError("cleanup failed")
+        ):
+            with self.assertRaises(OSError):
+                integrated.command_run(args(self.artifacts / "cleanup-failure"))
+        self.assertEqual(integrated.hardened.preflight, originals["preflight"])
 
 
 if __name__ == "__main__":
