@@ -1,18 +1,19 @@
 # PR-train real-run integration boundary
 
-Use `tools/ringer_supervisor_integrated.py` for codex-pr-train implementation runs.
-It delegates the worker lifecycle to `ringer_supervisor_hardened.py` and adds the
-integration invariants that are easy to violate when the controller, nested
-Codex process, OpenCode and Ringer use different runtime assumptions.
+Use `tools/ringer_supervisor_pr_train.py` for codex-pr-train implementation
+runs. It installs the canonical runtime environment and delegates manifest
+normalization and lifecycle guards to `ringer_supervisor_integrated.py`, which
+in turn delegates worker execution to `ringer_supervisor_hardened.py`.
 
 ## Contract
 
 - The source checkout, worktrees, artifacts and runtime root must resolve to
   separate locations. Runtime roots inside the source checkout fail closed.
-- The wrapper creates one canonical isolated `HOME` and XDG tree. If OpenCode
-  credentials are available, they are copied only to
-  `$XDG_DATA_HOME/opencode/auth.json`, which is the location used by both the
-  exact-model inference probe and the implementation worker.
+- The authoritative entrypoint installs one canonical isolated `HOME` and XDG
+  tree around the entire delegated lifecycle. The exact-model provider probe
+  and the implementation worker therefore resolve the same auth tree.
+- If OpenCode credentials are available, they are copied only to
+  `$XDG_DATA_HOME/opencode/auth.json`.
 - `expect_files` entries are normalized to `{{TASK_DIR}}/...`. Absolute paths
   are accepted only when they refer to the logical task directory; this avoids
   stale unsuffixed paths when Ringer creates `--attempt-001` worktrees.
@@ -25,7 +26,8 @@ Codex process, OpenCode and Ringer use different runtime assumptions.
 
 ## Credential seeding
 
-The wrapper finds an OpenCode auth source in this order:
+The entrypoint finds an OpenCode auth source before replacing the caller's
+HOME/XDG environment, in this order:
 
 1. `supervisor.credential_seed.source` in the manifest;
 2. `OPENCODE_AUTH_SOURCE`;
@@ -40,11 +42,11 @@ returns; non-sensitive manifests, progress and outcome evidence remain.
 ## Invocation
 
 ```bash
-python3 /path/to/ringer/tools/ringer_supervisor_integrated.py run \
+python3 /path/to/ringer/tools/ringer_supervisor_pr_train.py run \
   /external/runtime/manifest.json \
   --artifact-dir /external/runtime/artifacts
 ```
 
-The compatibility and original hardened entrypoints remain available for their
-existing callers. New codex-pr-train configurations should invoke only the
-integrated entrypoint.
+The compatibility, original hardened and lower-level integrated entrypoints
+remain available for existing or internal callers. New codex-pr-train
+configurations must invoke only the authoritative PR-train entrypoint.
