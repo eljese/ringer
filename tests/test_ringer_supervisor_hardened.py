@@ -125,7 +125,7 @@ class HardenedSupervisorTests(unittest.TestCase):
         return {
             "key": "task-1",
             "spec": "make the scoped change",
-            "check": "true",
+            "check": "git diff --check",
             "expect_files": ["{{TASK_DIR}}/result.txt"] if expect else [],
             "objective_checks": [{"argv": objective or ["git", "diff", "--check"]}],
         }
@@ -294,7 +294,7 @@ class HardenedSupervisorTests(unittest.TestCase):
         )
         fake.chmod(0o755)
         manifest = self.write_manifest(
-            self.task(objective=["/usr/bin/test", "-f", "missing-objective-file"]),
+            self.task(objective=["git", "cat-file", "-e", "HEAD:missing-objective-file"]),
             [{"engine": "opencode", "model": "minimax-only", "timeout_seconds": 5}],
         )
         self.assertEqual(hardened.command_run(self.args(manifest, fake)), 1)
@@ -302,7 +302,7 @@ class HardenedSupervisorTests(unittest.TestCase):
         attempt = outcome["tasks"][0]["attempts"][0]
         self.assertEqual(outcome["status"], "fail")
         self.assertEqual(attempt["failure_class"], "CHECK_FAILURE")
-        self.assertEqual(attempt["objective_checks"][0]["returncode"], 1)
+        self.assertEqual(attempt["objective_checks"][0]["returncode"], 128)
 
     def test_path_isolation_rejects_checkout_and_symlink_reentry(self) -> None:
         inside = self.repo / "runtime"
