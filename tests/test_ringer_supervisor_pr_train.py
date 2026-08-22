@@ -91,7 +91,10 @@ class PrTrainSupervisorTests(unittest.TestCase):
                     os.environ["XDG_DATA_HOME"], str(runtime / "xdg-data")
                 )
                 self.assertEqual(os.environ["RINGER_RUNTIME_ROOT"], str(runtime))
-                self.assertEqual(os.environ["OPENCODE_AUTH_SOURCE"], str(auth))
+                self.assertEqual(
+                    Path(os.environ["OPENCODE_AUTH_SOURCE"]).resolve(),
+                    auth.resolve(),
+                )
                 return 0
 
             with mock.patch.object(
