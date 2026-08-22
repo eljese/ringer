@@ -72,7 +72,7 @@ for a hardened PASS. All declared `objective_checks` must also pass.
 Run once and wait for the foreground process:
 
 ```bash
-python3 /home/eljese/ringer/tools/ringer_supervisor_hardened.py run \
+python3 /opt/ringer/tools/ringer_supervisor_hardened.py run \
   /absolute/path/to/manifest.json \
   --artifact-dir /absolute/path/to/artifacts
 ```
