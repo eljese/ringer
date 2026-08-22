@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -33,11 +34,19 @@ def command_run(args: argparse.Namespace) -> int:
     environment = layout.environment(previous)
     if credential_source is not None:
         environment["OPENCODE_AUTH_SOURCE"] = str(credential_source)
+        seed_home = layout.root / "seed-home"
+        seed_auth = seed_home / ".local" / "share" / "opencode" / "auth.json"
+        seed_auth.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(credential_source, seed_auth)
+        os.chmod(seed_auth, 0o600)
+        environment["RINGER_SAFE_SEED_HOME"] = str(seed_home)
     os.environ.clear()
     os.environ.update(environment)
     try:
         return integrated.command_run(args)
     finally:
+        for path in layout.root.rglob("auth.json"):
+            path.unlink(missing_ok=True)
         os.environ.clear()
         os.environ.update(previous)
 
