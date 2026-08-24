@@ -211,6 +211,19 @@ from the seed home. Never copy `opencode.db` or the rest of
 `~/.local/share/opencode`. Do not recover a missing MiniMax session by
 pointing OpenCode at the operator HOME.
 
+When an isolated codex-pr-train coordinator sets the fixed boolean
+`RINGER_SAFE_USE_ACCOUNT_HOME=1`, `engines/opencode-sandboxed.sh` also ignores
+the coordinator's `PATH`. On Linux it resolves the current UID through fixed
+`/usr/bin` tools, validates the canonical login home, and runs only the
+owner-controlled executable reached from `~/.local/bin/opencode`. The launcher
+must resolve inside that home through owner-controlled, non-group/world-
+writable directories to an owner-controlled executable. The caller cannot
+provide an executable or home path. A missing or unsafe installation fails
+closed before the provider probe. This mode pins `PATH=/usr/bin:/bin` and
+`/usr/bin/bwrap`, rejects `--no-sandbox`, and mounts supervisor-provided extra
+repository paths read-only; only the task directory and isolated runtime state
+remain writable inside bubblewrap.
+
 When `RINGER_SAFE_AGY_COPY_PATHS` is unset, the wrapper seeds only:
 
 - `.gemini/antigravity-cli/antigravity-oauth-token`
