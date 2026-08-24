@@ -15,6 +15,7 @@ import shlex
 import signal
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 
@@ -856,6 +857,11 @@ class EngineConfig:
     # Optional worker environment overlay. Values are templates expanded
     # with {runtime_root}, {run_id}, {task_key}, {taskdir} — never a shell.
     env: tuple[tuple[str, str], ...] = ()
+    # Some review CLIs return their report only as the final headless response.
+    # The only supported destination is the fixed review artifact name; keeping
+    # this deliberately narrow avoids turning trusted engine configuration into
+    # a generic task-directory write primitive.
+    stdout_artifact: str | None = None
 
     @property
     def process_name(self) -> str:
@@ -2719,6 +2725,13 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
         model_default = str(
             section.get("model_default", base.model_default if base else "")
         ).strip()
+        stdout_artifact = optional_string(section.get("stdout_artifact"))
+        if stdout_artifact is None and base is not None:
+            stdout_artifact = base.stdout_artifact
+        if stdout_artifact is not None and stdout_artifact != "report.md":
+            raise ValueError(
+                f"engines.{clean_name}.stdout_artifact must be exactly 'report.md'"
+            )
         env = load_engine_env(section.get("env"), engine_name=clean_name)
         engines[clean_name] = EngineConfig(
             name=clean_name,
@@ -2729,6 +2742,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             token_regex=token_regex,
             model_report_regex=model_report_regex,
             model_default=model_default,
+            stdout_artifact=stdout_artifact,
             env=env,
         )
     return engines
@@ -3312,6 +3326,68 @@ def lifecycle_atomic_write_text(path: Path, text: str) -> None:
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+STDOUT_ARTIFACT_CONTRACT = """\
+Ringer final-response artifact contract (authoritative):
+- Do not call file-write, artifact-write, shell, or command tools to create report.md.
+- Return the complete review report in your final response instead.
+- Begin the final response with the exact heading `## Findings`.
+- Do not include credentials, authorization data, session cookies, or secrets.
+- Ringer will persist that final response atomically as report.md after you exit.
+"""
+
+
+def append_stdout_artifact_contract(spec: str, artifact_name: str | None) -> str:
+    """Append the fixed provider-output contract for the one supported report."""
+    if artifact_name is None:
+        return spec
+    if artifact_name != "report.md":
+        raise ValueError("stdout artifact must be exactly 'report.md'")
+    return f"{spec.rstrip()}\n\n{STDOUT_ARTIFACT_CONTRACT.rstrip()}"
+
+
+def persist_stdout_artifact(
+    taskdir: Path,
+    artifact_name: str,
+    output: str,
+) -> str | None:
+    """Persist a successful worker's final response without following links.
+
+    Returns an error string on failure so the worker result can fail closed.
+    Existing regular reports are left intact for providers that still honor
+    the task-directory file contract.
+    """
+    if artifact_name != "report.md":
+        return "stdout artifact must be exactly 'report.md'"
+    if taskdir.is_symlink() or not taskdir.is_dir():
+        return f"stdout artifact task directory is not a real directory: {taskdir}"
+    target = taskdir / artifact_name
+    if target.parent != taskdir:
+        return "stdout artifact path escapes the task directory"
+    try:
+        existing = target.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        return f"could not inspect stdout artifact target: {exc}"
+    if existing is not None:
+        if stat.S_ISLNK(existing.st_mode):
+            return f"stdout artifact target is a symlink: {target}"
+        if not stat.S_ISREG(existing.st_mode):
+            return f"stdout artifact target is not a regular file: {target}"
+        return None
+    report = output.strip()
+    if not report:
+        return "worker returned no final response for stdout artifact report.md"
+    try:
+        lifecycle_atomic_write_text(target, report + "\n")
+        installed = target.lstat()
+    except OSError as exc:
+        return f"could not persist stdout artifact report.md: {exc}"
+    if stat.S_ISLNK(installed.st_mode) or not stat.S_ISREG(installed.st_mode):
+        return f"stdout artifact target is not a regular file after install: {target}"
+    return None
 
 
 def lifecycle_atomic_write_bytes(path: Path, payload: bytes) -> None:
@@ -11047,6 +11123,15 @@ class RingerRunner:
         reports_fresh = True
         for report_name in sorted(LIFECYCLE_REPORT_NAMES):
             source = runtime.taskdir / report_name
+            if source.is_symlink():
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] lifecycle: rejected symlink report {report_name}\n",
+                )
+                with self.lock:
+                    runtime.failure_class = "STALE_ARTIFACT"
+                reports_fresh = False
+                continue
             if not source.is_file():
                 continue
             binding_path = source.with_suffix(source.suffix + ".binding.json")
@@ -11140,6 +11225,12 @@ class RingerRunner:
         for report_name in sorted(LIFECYCLE_REPORT_NAMES):
             source = runtime.taskdir / report_name
             binding = source.with_suffix(source.suffix + ".binding.json")
+            if source.is_symlink() or binding.is_symlink():
+                append_text(
+                    runtime.log_path,
+                    f"[ringer.py] lifecycle: refused symlink while rotating {report_name}\n",
+                )
+                return False
             if not source.exists() and not binding.exists():
                 continue
             try:
@@ -11357,6 +11448,20 @@ class RingerRunner:
                 runtime.steering = steering_state
             with contextlib.suppress(Exception):
                 append_text(log_path, steering_line)
+        if engine.stdout_artifact is not None:
+            command_spec = append_stdout_artifact_contract(
+                command_spec,
+                engine.stdout_artifact,
+            )
+            cmd = build_worker_command(
+                engine,
+                taskdir=runtime.taskdir,
+                workdir=self.manifest.workdir,
+                spec=command_spec,
+                full_access=runtime.task.full_access,
+                engine_args=runtime.task.engine_args,
+                model=runtime.task.model,
+            )
         with self.lock:
             runtime.last_worker_command = list(cmd)
         display_cmd = [
@@ -11474,6 +11579,27 @@ class RingerRunner:
         output_tail = capture.text()
         tokens = parse_token_count(output_tail, engine.token_regex)
         reported_model = parse_reported_model(output_tail, engine.model_report_regex)
+        artifact_error: str | None = None
+        if (
+            engine.stdout_artifact is not None
+            and proc.returncode == 0
+            and not timed_out
+        ):
+            artifact_error = persist_stdout_artifact(
+                runtime.taskdir,
+                engine.stdout_artifact,
+                output_tail,
+            )
+            if artifact_error is None:
+                append_text(
+                    log_path,
+                    f"[ringer.py] captured worker stdout as {engine.stdout_artifact}\n",
+                )
+            else:
+                append_text(
+                    log_path,
+                    f"[ringer.py] stdout artifact capture failed: {artifact_error}\n",
+                )
         if timed_out:
             append_text(log_path, f"\n[ringer.py] worker timed out after {runtime.task.timeout_s}s\n")
         append_text(log_path, f"[ringer.py] attempt {attempt} exited rc={proc.returncode}\n")
@@ -11482,6 +11608,7 @@ class RingerRunner:
             timed_out=timed_out,
             tokens=tokens,
             reported_model=reported_model,
+            error=artifact_error,
         )
 
     async def _tee_stream(

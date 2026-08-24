@@ -186,6 +186,10 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # full_access_args = ["--dangerously-skip-permissions"]
 # Token output format for agy 1.1.13 not yet verified — leave disabled.
 # token_regex = ""
+# AGY 1.1.19 may restrict write_to_file to its private brain directory.
+# Capture its final headless response at Ringer's fixed review output instead;
+# the only accepted value is exactly "report.md".
+# stdout_artifact = "report.md"
 #
 # Optional per-task engine HOME/XDG/TMP. Placeholders are expanded without a
 # shell: {runtime_root}, {run_id}, {task_key}, {taskdir}. When isolation is

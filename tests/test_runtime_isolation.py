@@ -1463,6 +1463,7 @@ class SafeRunWrapperTests(IsolationTestCase):
         ))
         self.assertIn(("--add-dir", "{workdir}"), pairs)
         self.assertIn(("--add-dir", "{taskdir}"), pairs)
+        self.assertEqual(data["engines"]["agy"]["stdout_artifact"], "report.md")
 
     def test_safe_config_full_access_args_empty(self) -> None:
         data = tomllib.loads((ROOT / "config.safe.toml").read_text(encoding="utf-8"))
