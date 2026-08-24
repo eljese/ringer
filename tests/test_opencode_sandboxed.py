@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -18,7 +17,7 @@ WRAPPER = ROOT / "engines" / "opencode-sandboxed.sh"
 
 def write_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    path.chmod(0o755)
 
 
 class OpenCodeSandboxWrapperTests(unittest.TestCase):
@@ -32,6 +31,91 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def validate_account_opencode(self, home: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; validate_account_opencode "$2" "$3"',
+                "account-opencode-test",
+                str(WRAPPER),
+                str(home),
+                str(os.getuid()),
+            ],
+            env={"PATH": str(self.stubbin)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux account lookup path")
+    def test_account_opencode_validation_ignores_path_and_accepts_owned_binary(self) -> None:
+        home = self.root / "account-home"
+        launcher = home / ".local" / "bin" / "opencode"
+        launcher.parent.mkdir(parents=True)
+        home.chmod(0o700)
+        (home / ".local").chmod(0o755)
+        launcher.parent.chmod(0o755)
+        write_executable(launcher, "#!/bin/bash\nexit 0\n")
+        hostile = self.stubbin / "opencode"
+        write_executable(hostile, "#!/bin/bash\nexit 99\n")
+
+        result = self.validate_account_opencode(home)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(str(launcher.resolve()), result.stdout.strip())
+        self.assertNotEqual(str(hostile), result.stdout.strip())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux account lookup path")
+    def test_account_opencode_validation_rejects_symlink_escape(self) -> None:
+        home = self.root / "account-home"
+        launcher = home / ".local" / "bin" / "opencode"
+        launcher.parent.mkdir(parents=True)
+        home.chmod(0o700)
+        (home / ".local").chmod(0o755)
+        launcher.parent.chmod(0o755)
+        outside = self.root / "outside-opencode"
+        write_executable(outside, "#!/bin/bash\nexit 0\n")
+        launcher.symlink_to(outside)
+
+        result = self.validate_account_opencode(home)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("escapes the login home", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux account lookup path")
+    def test_account_opencode_validation_rejects_writable_parent(self) -> None:
+        home = self.root / "account-home"
+        launcher = home / ".local" / "bin" / "opencode"
+        launcher.parent.mkdir(parents=True)
+        home.chmod(0o700)
+        (home / ".local").chmod(0o755)
+        launcher.parent.chmod(0o755)
+        write_executable(launcher, "#!/bin/bash\nexit 0\n")
+        launcher.parent.chmod(0o775)
+
+        result = self.validate_account_opencode(home)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unsafe parent mode", result.stderr)
+
+    def test_account_home_mode_rejects_non_boolean_value(self) -> None:
+        write_executable(self.stubbin / "opencode", "#!/bin/bash\nexit 0\n")
+        env = os.environ.copy()
+        env["PATH"] = f"{self.stubbin}{os.pathsep}{env.get('PATH', '')}"
+        env["RINGER_SAFE_USE_ACCOUNT_HOME"] = str(self.root)
+
+        result = subprocess.run(
+            [str(WRAPPER), str(self.taskdir), "--no-sandbox", "run", "noop"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("MANIFEST_POLICY_FAILURE", result.stderr)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bubblewrap path")
     def test_linux_sandbox_uses_bwrap_and_binds_taskdir(self) -> None:

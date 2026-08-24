@@ -2,15 +2,133 @@
 # Ringer engine wrapper: run OpenCode under a host sandbox.
 set -euo pipefail
 
+preflight_failure() {
+  echo "PREFLIGHT_FAILURE" >&2
+  echo "$1" >&2
+  return 1
+}
+
+validate_account_opencode() {
+  local account_home="$1"
+  local account_uid="$2"
+  local canonical_home launcher launcher_owner resolved owner mode mode_value directory
+
+  case "$account_home" in
+    /*) ;;
+    *) preflight_failure "login account home is not absolute"; return 1 ;;
+  esac
+  if [ "$account_home" = "/" ] || [ -L "$account_home" ] || [ ! -d "$account_home" ]; then
+    preflight_failure "login account home is unsafe or unavailable"
+    return 1
+  fi
+  canonical_home="$(/usr/bin/realpath -- "$account_home")" || return 1
+  if [ "$canonical_home" != "$account_home" ]; then
+    preflight_failure "login account home is not canonical"
+    return 1
+  fi
+  owner="$(/usr/bin/stat -c %u -- "$canonical_home")" || return 1
+  mode="$(/usr/bin/stat -c %a -- "$canonical_home")" || return 1
+  mode_value=$((8#$mode))
+  if [ "$owner" != "$account_uid" ] || (( (mode_value & 0022) != 0 )); then
+    preflight_failure "login account home has unsafe ownership or mode"
+    return 1
+  fi
+
+  launcher="$canonical_home/.local/bin/opencode"
+  if [ ! -x "$launcher" ]; then
+    preflight_failure "account OpenCode launcher is unavailable"
+    return 1
+  fi
+  launcher_owner="$(/usr/bin/stat -c %u -- "$launcher")" || return 1
+  if [ "$launcher_owner" != "$account_uid" ]; then
+    preflight_failure "account OpenCode launcher has an unsafe owner"
+    return 1
+  fi
+  resolved="$(/usr/bin/realpath -- "$launcher")" || return 1
+  case "$resolved" in
+    "$canonical_home"/*) ;;
+    *) preflight_failure "account OpenCode launcher escapes the login home"; return 1 ;;
+  esac
+  if [ -L "$resolved" ] || [ ! -f "$resolved" ] || [ ! -x "$resolved" ]; then
+    preflight_failure "account OpenCode executable is unsafe or unavailable"
+    return 1
+  fi
+  owner="$(/usr/bin/stat -c %u -- "$resolved")" || return 1
+  mode="$(/usr/bin/stat -c %a -- "$resolved")" || return 1
+  mode_value=$((8#$mode))
+  if [ "$owner" != "$account_uid" ] || (( (mode_value & 0022) != 0 )); then
+    preflight_failure "account OpenCode executable has unsafe ownership or mode"
+    return 1
+  fi
+
+  directory="${resolved%/*}"
+  while [ "$directory" != "$canonical_home" ]; do
+    case "$directory" in
+      "$canonical_home"/*) ;;
+      *) preflight_failure "account OpenCode executable escaped the login home"; return 1 ;;
+    esac
+    if [ -L "$directory" ] || [ ! -d "$directory" ]; then
+      preflight_failure "account OpenCode executable has an unsafe parent"
+      return 1
+    fi
+    owner="$(/usr/bin/stat -c %u -- "$directory")" || return 1
+    mode="$(/usr/bin/stat -c %a -- "$directory")" || return 1
+    mode_value=$((8#$mode))
+    if [ "$owner" != "$account_uid" ] || (( (mode_value & 0022) != 0 )); then
+      preflight_failure "account OpenCode executable has an unsafe parent mode"
+      return 1
+    fi
+    directory="${directory%/*}"
+  done
+  printf '%s\n' "$resolved"
+}
+
+resolve_account_opencode() {
+  local account_uid account_record account_name record_uid account_home account_shell
+  if [ ! -x /usr/bin/id ] || [ ! -x /usr/bin/getent ] || \
+     [ ! -x /usr/bin/stat ] || [ ! -x /usr/bin/realpath ]; then
+    preflight_failure "account OpenCode resolution tools are unavailable"
+    return 1
+  fi
+  account_uid="$(/usr/bin/id -u)" || return 1
+  account_record="$(/usr/bin/getent passwd "$account_uid")" || {
+    preflight_failure "login account could not be resolved"
+    return 1
+  }
+  IFS=: read -r account_name _ record_uid _ _ account_home account_shell \
+    <<< "$account_record"
+  if [ -z "$account_name" ] || [ "$record_uid" != "$account_uid" ]; then
+    preflight_failure "login account record is malformed"
+    return 1
+  fi
+  validate_account_opencode "$account_home" "$account_uid"
+}
+
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 TASKDIR="${1:?usage: opencode-sandboxed.sh <taskdir> [--no-sandbox] <args...>}"
 shift
 SANDBOX=1
 if [ "${1:-}" = "--no-sandbox" ]; then SANDBOX=0; shift; fi
 
-if ! OPENCODE_BIN="$(command -v opencode)" || [ -z "$OPENCODE_BIN" ]; then
-  echo "opencode-sandboxed.sh: opencode not found on PATH" >&2
-  exit 127
-fi
+case "${RINGER_SAFE_USE_ACCOUNT_HOME:-}" in
+  "")
+    if ! OPENCODE_BIN="$(command -v opencode)" || [ -z "$OPENCODE_BIN" ]; then
+      echo "opencode-sandboxed.sh: opencode not found on PATH" >&2
+      exit 127
+    fi
+    ;;
+  1)
+    OPENCODE_BIN="$(resolve_account_opencode)" || exit 127
+    ;;
+  *)
+    echo "MANIFEST_POLICY_FAILURE" >&2
+    echo "RINGER_SAFE_USE_ACCOUNT_HOME must be empty or 1" >&2
+    exit 2
+    ;;
+esac
 
 if [ "$SANDBOX" = "0" ]; then
   exec "$OPENCODE_BIN" "$@" < /dev/null
