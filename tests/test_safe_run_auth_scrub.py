@@ -300,6 +300,7 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         self.assertEqual([], oauth_paths(runtime))
         self.assertTrue((runtime / "host-home").is_dir())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "account-home mode is Linux-only")
     def test_account_home_resolver_ignores_isolated_caller_home(self) -> None:
         env = self.wrapper_env(mode="ok")
         result = self.source_wrapper("resolve_login_account_home", env=env)
