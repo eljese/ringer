@@ -219,7 +219,10 @@ owner-controlled executable reached from `~/.local/bin/opencode`. The launcher
 must resolve inside that home through owner-controlled, non-group/world-
 writable directories to an owner-controlled executable. The caller cannot
 provide an executable or home path. A missing or unsafe installation fails
-closed before the provider probe.
+closed before the provider probe. This mode pins `PATH=/usr/bin:/bin` and
+`/usr/bin/bwrap`, rejects `--no-sandbox`, and mounts supervisor-provided extra
+repository paths read-only; only the task directory and isolated runtime state
+remain writable inside bubblewrap.
 
 When `RINGER_SAFE_AGY_COPY_PATHS` is unset, the wrapper seeds only:
 

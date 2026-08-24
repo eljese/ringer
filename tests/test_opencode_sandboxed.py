@@ -100,6 +100,48 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unsafe parent mode", result.stderr)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux account lookup path")
+    def test_account_opencode_validation_checks_symlink_launcher_ancestors(self) -> None:
+        home = self.root / "account-home"
+        launcher = home / ".local" / "bin" / "opencode"
+        target = home / "opt" / "opencode"
+        launcher.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True)
+        home.chmod(0o700)
+        (home / ".local").chmod(0o755)
+        launcher.parent.chmod(0o775)
+        target.parent.chmod(0o755)
+        write_executable(target, "#!/bin/bash\nexit 0\n")
+        launcher.symlink_to(target)
+
+        result = self.validate_account_opencode(home)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unsafe parent mode", result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux account lookup path")
+    def test_account_mode_pins_path_and_bwrap(self) -> None:
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; activate_account_mode; '
+                'printf "PATH=%s\\nBWRAP=%s\\n" "$PATH" "$(select_bwrap_bin 1)"',
+                "account-mode-test",
+                str(WRAPPER),
+            ],
+            env={
+                "PATH": str(self.stubbin),
+                "RINGER_OPENCODE_BWRAP_BIN": str(self.stubbin / "hostile-bwrap"),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("PATH=/usr/bin:/bin\nBWRAP=/usr/bin/bwrap\n", result.stdout)
+
     def test_account_home_mode_rejects_non_boolean_value(self) -> None:
         write_executable(self.stubbin / "opencode", "#!/bin/bash\nexit 0\n")
         env = os.environ.copy()
@@ -116,6 +158,21 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
 
         self.assertEqual(2, result.returncode, result.stderr)
         self.assertIn("MANIFEST_POLICY_FAILURE", result.stderr)
+
+    def test_account_home_mode_rejects_no_sandbox(self) -> None:
+        env = os.environ.copy()
+        env["RINGER_SAFE_USE_ACCOUNT_HOME"] = "1"
+
+        result = subprocess.run(
+            [str(WRAPPER), str(self.taskdir), "--no-sandbox", "run", "noop"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("account-home mode requires the OpenCode sandbox", result.stderr)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux bubblewrap path")
     def test_linux_sandbox_uses_bwrap_and_binds_taskdir(self) -> None:
@@ -185,6 +242,7 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
         args = args_file.read_text(encoding="utf-8").splitlines()
         resolved = str(extra.resolve())
         self.assertIn(resolved, args)
+        self.assertEqual("--ro-bind", args[args.index(resolved) - 1])
         self.assertIn("run", args)
         self.assertIn("--auto", args)
         run_at = args.index("run")
@@ -204,7 +262,7 @@ class OpenCodeSandboxWrapperTests(unittest.TestCase):
 
         result = subprocess.run(
             [str(WRAPPER), str(self.taskdir), "--no-sandbox", "run", "noop"],
-            cwd=self.taskdir,
+            cwd=self.root,
             env=env,
             capture_output=True,
             text=True,
