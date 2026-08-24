@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Isolated host entrypoint for sandboxed AGY review runs.
 #
 # Codex/orchestrator -> bin/ringer-safe-run -> validator -> isolated Ringer
@@ -17,19 +17,78 @@ OWNERSHIP_MARKER=".ringer-safe-runtime"
 # .local/share/opencode/auth.json — never opencode.db. Unset uses this
 # list; an explicit empty value copies nothing.
 DEFAULT_AGY_COPY_PATHS=".gemini/antigravity-cli/antigravity-oauth-token:.gemini/oauth_creds.json:.gemini/google_accounts.json:.local/share/opencode/auth.json"
+ACCOUNT_HOME_AGY_COPY_PATHS=".gemini/antigravity-cli/antigravity-oauth-token:.gemini/oauth_creds.json:.gemini/google_accounts.json"
 AUTH_BASENAMES="antigravity-oauth-token:oauth_creds.json:google_accounts.json:auth.json"
 
-RINGER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+RINGER_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+RINGER_ROOT="$(cd -- "$RINGER_SCRIPT_DIR/.." && pwd)"
 RUNTIME=""
 RUNTIME_PARENT=""
 RUNTIME_CREATED=0
 KEEP_RUNTIME=0
 REAL_HOME="${HOME:-}"
 HOST_HOME=""
+ACCOUNT_HOME_MODE=0
 
 usage() {
   echo "usage: ringer-safe-run --manifest PATH --identity NAME [--keep-runtime]" >&2
   exit 64
+}
+
+resolve_login_account_home() {
+  local account_uid account_record account_name record_uid account_home account_shell
+  local canonical owner mode mode_value
+  if [ ! -x /usr/bin/id ] || [ ! -x /usr/bin/getent ] || [ ! -x /usr/bin/stat ]; then
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "account-home resolution tools are unavailable" >&2
+    return 1
+  fi
+  account_uid="$(/usr/bin/id -u)" || return 1
+  account_record="$(/usr/bin/getent passwd "$account_uid")" || {
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "login account could not be resolved" >&2
+    return 1
+  }
+  IFS=: read -r account_name _ record_uid _ _ account_home account_shell \
+    <<< "$account_record"
+  if [ -z "$account_name" ] || [ "$record_uid" != "$account_uid" ]; then
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "login account record is malformed" >&2
+    return 1
+  fi
+  case "$account_home" in
+    /*) ;;
+    *)
+      echo "PREFLIGHT_FAILURE" >&2
+      echo "login account home is not absolute" >&2
+      return 1
+      ;;
+  esac
+  if [ "$account_home" = "/" ] || [ -L "$account_home" ] || [ ! -d "$account_home" ]; then
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "login account home is unsafe or unavailable" >&2
+    return 1
+  fi
+  if path_has_symlink_dir "$account_home/.ringer-account-home-check" "/"; then
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "login account home contains a symlink component" >&2
+    return 1
+  fi
+  canonical="$(realpath -- "$account_home")" || return 1
+  if [ "$canonical" != "$account_home" ]; then
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "login account home is not canonical" >&2
+    return 1
+  fi
+  owner="$(/usr/bin/stat -c %u -- "$canonical")" || return 1
+  mode="$(/usr/bin/stat -c %a -- "$canonical")" || return 1
+  mode_value=$((8#$mode))
+  if [ "$owner" != "$account_uid" ] || (( (mode_value & 0022) != 0 )); then
+    echo "PREFLIGHT_FAILURE" >&2
+    echo "login account home has unsafe ownership or mode" >&2
+    return 1
+  fi
+  printf '%s\n' "$canonical"
 }
 
 is_under() {
@@ -427,6 +486,27 @@ ringer_safe_main() {
   KEEP_RUNTIME=0
   RUNTIME_CREATED=0
 
+  case "${RINGER_SAFE_USE_ACCOUNT_HOME:-}" in
+    "") ACCOUNT_HOME_MODE=0 ;;
+    1)
+      ACCOUNT_HOME_MODE=1
+      PATH="/usr/bin:/bin"
+      PYTHON_BIN="/usr/bin/python3"
+      CONFIG="$RINGER_ROOT/config.safe.toml"
+      RINGER_SAFE_ALLOWED_ENGINES="agy"
+      RINGER_SAFE_AGY_COPY_PATHS="$ACCOUNT_HOME_AGY_COPY_PATHS"
+      RINGER_SAFE_ROOT_SEP=:
+      RINGER_SAFE_MAX_PARALLEL=1
+      export RINGER_SAFE_ALLOWED_ENGINES RINGER_SAFE_AGY_COPY_PATHS
+      export RINGER_SAFE_ROOT_SEP RINGER_SAFE_MAX_PARALLEL PATH
+      ;;
+    *)
+      echo "MANIFEST_POLICY_FAILURE" >&2
+      echo "RINGER_SAFE_USE_ACCOUNT_HOME must be unset or 1" >&2
+      exit 2
+      ;;
+  esac
+
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --manifest)
@@ -529,7 +609,11 @@ ringer_safe_main() {
     exit 2
   fi
 
-  PARENT="${RINGER_SAFE_RUNTIME_PARENT:-${TMPDIR:-/tmp}}"
+  if [ "$ACCOUNT_HOME_MODE" -eq 1 ]; then
+    PARENT="/tmp"
+  else
+    PARENT="${RINGER_SAFE_RUNTIME_PARENT:-${TMPDIR:-/tmp}}"
+  fi
   PARENT="$(realpath -- "$PARENT" 2>/dev/null || printf '%s' "$PARENT")"
   RUNTIME_PARENT="$PARENT"
   if is_under "$PARENT" "$RINGER_ROOT"; then
@@ -557,7 +641,13 @@ ringer_safe_main() {
   trap 'forward_signal INT 130' INT
   trap 'forward_signal TERM 143' TERM
 
-  REAL_HOME="${HOME}"
+  if [ "$ACCOUNT_HOME_MODE" -eq 1 ]; then
+    REAL_HOME="$(resolve_login_account_home)" || exit 2
+    PATH="$REAL_HOME/.local/bin:/usr/bin:/bin"
+    export PATH
+  else
+    REAL_HOME="${HOME}"
+  fi
   export RINGER_SAFE_REAL_HOME="$REAL_HOME"
   HOST_HOME="$RUNTIME/host-home"
   mkdir -p -- \
@@ -589,7 +679,11 @@ ringer_safe_main() {
   export XDG_STATE_HOME="$HOST_HOME/.local/state"
   export XDG_DATA_HOME="$HOST_HOME/.local/share"
   export TMPDIR="$RUNTIME/tmp"
-  export RINGER_SAFE_SOURCE_REPO="${RINGER_SAFE_SOURCE_REPO:-$RINGER_ROOT}"
+  if [ "$ACCOUNT_HOME_MODE" -eq 1 ]; then
+    export RINGER_SAFE_SOURCE_REPO="$RINGER_ROOT"
+  else
+    export RINGER_SAFE_SOURCE_REPO="${RINGER_SAFE_SOURCE_REPO:-$RINGER_ROOT}"
+  fi
 
   wait_child() {
     local child_status=0

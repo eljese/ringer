@@ -136,6 +136,19 @@ Native Ringside.app (`hud/src`) is a parked prototype and does not honor
 ## Safe runner
 
 `bin/ringer-safe-run` is the Linux host wrapper for sandboxed AGY review.
+When its caller already has an intentionally isolated `HOME`, set the boolean
+`RINGER_SAFE_USE_ACCOUNT_HOME=1`. The wrapper then resolves the current login
+account through `/usr/bin/getent`, rejects a symlinked, foreign-owned, or
+group/other-writable account home, and seeds only its fixed credential
+allowlist. The caller cannot supply an alternate path; any value other than
+unset or `1` fails closed. In this mode the wrapper also pins `/usr/bin/python3`,
+the checked-in `config.safe.toml`, the `agy`-only engine allowlist, maximum
+parallelism `1`, the fixed credential paths, the Ringer source, and `/tmp` as
+the runtime parent. It uses `/bin/bash`, starts with `PATH=/usr/bin:/bin`, then
+adds only the validated account's `.local/bin` for the installed AGY command.
+Only the three AGY OAuth files are eligible for seeding in this mode; OpenCode
+auth is excluded because the engine allowlist is AGY-only. Caller values cannot
+replace those executable surfaces.
 
 ```bash
 bin/ringer-safe-run --manifest /path/to/manifest.json --identity grok-build

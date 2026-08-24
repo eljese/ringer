@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import pwd
 import shutil
 import signal
 import subprocess
@@ -298,6 +299,21 @@ class SafeRunAuthScrubTests(IsolationTestCase):
         runtime = self.parse_runtime(result.stdout)
         self.assertEqual([], oauth_paths(runtime))
         self.assertTrue((runtime / "host-home").is_dir())
+
+    def test_account_home_resolver_ignores_isolated_caller_home(self) -> None:
+        env = self.wrapper_env(mode="ok")
+        result = self.source_wrapper("resolve_login_account_home", env=env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        expected = str(Path(pwd.getpwuid(os.getuid()).pw_dir).resolve())
+        self.assertEqual(result.stdout.strip(), expected)
+        self.assertNotEqual(Path(env["HOME"]), Path(expected))
+
+    def test_account_home_mode_rejects_non_boolean_value(self) -> None:
+        env = self.wrapper_env(mode="ok")
+        env["RINGER_SAFE_USE_ACCOUNT_HOME"] = str(self.fake_home)
+        result = self.run_wrapper(self.write_manifest(), env)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("MANIFEST_POLICY_FAILURE", result.stdout)
 
     def test_exit_trap_scrubs_auth_after_sigterm(self) -> None:
         env = self.wrapper_env(mode="sleep")
