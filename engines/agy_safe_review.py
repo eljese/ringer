@@ -15,22 +15,25 @@ from typing import NoReturn
 LAUNCHER_PATH = Path(__file__).resolve()
 ENTRYPOINT_PATH = LAUNCHER_PATH.with_name("agy")
 PROFILE_PATH = LAUNCHER_PATH.parents[1] / "profiles" / "agy-review-settings.json"
+SUPPORTED_ACTIONS = {
+    "read_file",
+    "write_file",
+    "read_url",
+    "execute_url",
+    "command",
+    "unsandboxed",
+    "mcp",
+}
 EXPECTED_ALLOW = {
     "read_file(*)",
-    "grep_search(*)",
-    "list_dir(*)",
-    "list_directory(*)",
     "write_file(*)",
 }
 REQUIRED_DENY = {
+    "read_url(*)",
+    "execute_url(*)",
     "command(*)",
-    "run_command(*)",
-    "Bash(*)",
-    "bash(*)",
+    "unsandboxed(*)",
     "mcp(*)",
-    "search_web(*)",
-    "web_search(*)",
-    "read_url_content(*)",
 }
 FORBIDDEN_TOP_LEVEL = {
     "toolPermission",
@@ -52,32 +55,77 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
-def _validate_profile(profile: object) -> dict[str, object]:
+def _rule_action(rule: str) -> str | None:
+    action, separator, target = rule.partition("(")
+    if not separator or not action or not target.endswith(")") or target == ")":
+        return None
+    return action
+
+
+def _validate_profile(
+    profile: object,
+    *,
+    sparse_defaults: bool = False,
+) -> dict[str, object]:
     if not isinstance(profile, dict):
         fail("review settings profile must be a JSON object")
     if FORBIDDEN_TOP_LEVEL.intersection(profile):
         fail("review settings profile contains broad approval state")
-    if profile.get("enableTelemetry") is not False:
-        fail("review settings must disable telemetry")
-    if profile.get("allowNonWorkspaceAccess") is not False:
-        fail("review settings must forbid non-workspace access")
+
+    for key, label in (
+        ("enableTelemetry", "disable telemetry"),
+        ("allowNonWorkspaceAccess", "forbid non-workspace access"),
+    ):
+        if key not in profile:
+            if not sparse_defaults:
+                fail(f"review settings must {label}")
+        elif profile[key] is not False:
+            fail(f"review settings must {label}")
 
     permissions = profile.get("permissions")
     if not isinstance(permissions, dict):
         fail("review settings permissions must be an object")
     allow = permissions.get("allow")
     deny = permissions.get("deny")
-    if not isinstance(allow, list) or not all(isinstance(item, str) for item in allow):
-        fail("review settings allow list is invalid")
-    if not isinstance(deny, list) or not all(isinstance(item, str) for item in deny):
-        fail("review settings deny list is invalid")
+    ask = permissions.get("ask", [])
+    for name, rules in (("allow", allow), ("deny", deny), ("ask", ask)):
+        if not isinstance(rules, list) or not all(isinstance(item, str) for item in rules):
+            fail(f"review settings {name} list is invalid")
+        if len(rules) != len(set(rules)):
+            fail(f"review settings {name} list contains duplicates")
+        invalid = sorted(
+            rule
+            for rule in rules
+            if _rule_action(rule) not in SUPPORTED_ACTIONS
+        )
+        if invalid:
+            fail(
+                f"review settings {name} list contains unsupported actions: "
+                + ", ".join(invalid)
+            )
+
     if set(allow) != EXPECTED_ALLOW:
-        fail("review settings allow list is broader or narrower than the approved profile")
-    if not REQUIRED_DENY.issubset(set(deny)):
-        fail("review settings do not deny command, web, and MCP capabilities")
-    if any(item in {"*", "command", "command(*)"} for item in allow):
+        fail("review settings allow list is broader or narrower than file review")
+    deny_set = set(deny)
+    if sparse_defaults:
+        if not REQUIRED_DENY.issubset(deny_set):
+            fail("persisted review settings do not deny command, web, and MCP capabilities")
+    elif deny_set != REQUIRED_DENY:
+        fail("review settings deny list differs from the approved profile")
+    if any(item in {"*", "command", "command(*)", "unsandboxed(*)"} for item in allow):
         fail("review settings grant broad command access")
     return profile
+
+
+def validate_persisted_settings(path: Path) -> dict[str, object]:
+    """Validate AGY's sparse persisted settings without requiring byte identity."""
+    if path.is_symlink() or not path.is_file():
+        fail("persisted AGY settings are missing or are a symlink")
+    try:
+        profile = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"could not load persisted AGY settings: {error}")
+    return _validate_profile(profile, sparse_defaults=True)
 
 
 def _ensure_safe_home() -> tuple[Path, Path]:

@@ -2,18 +2,38 @@
 
 `engines/agy` is the validator-compatible executable entrypoint for isolated AGY review runs. It imports `engines/agy_safe_review.py`, validates the isolated worker environment, locates the real `agy` executable outside the Ringer launcher directory, and then replaces itself with that provider.
 
-For the exact preflight probe `agy --version`, the entrypoint forwards directly to the real provider without creating settings. This keeps version detection independent of the review profile. All normal review invocations install the Ringer-owned AGY settings profile into the isolated per-task worker `HOME` before provider execution.
+For the exact preflight probe `agy --version`, the entrypoint forwards directly to the real provider without creating settings. This keeps version detection independent of the review profile. All normal review invocations validate and install the Ringer-owned AGY settings profile into the isolated per-task worker `HOME` before provider execution.
 
 The entrypoint is intended only for `bin/ringer-safe-run` review tasks. It requires `RINGER_SAFE_ENFORCE=1`, requires `HOME` below `RINGER_RUNTIME_ROOT/engine-homes/agy/`, refuses symlinks, refuses to overwrite an existing settings file, writes the checked-in profile byte-for-byte with mode `0600`, and never copies the operator's normal AGY settings.
 
-The profile allows only AGY file-review capabilities:
+The profile uses only permission action namespaces documented by AGY:
 
-- `read_file`
-- `grep_search`
-- `list_dir` / `list_directory`
-- `write_file`
+- allowed: `read_file(*)`, `write_file(*)`
+- denied: `read_url(*)`, `execute_url(*)`, `command(*)`, `unsandboxed(*)`, `mcp(*)`
 
-It explicitly denies command, shell aliases, MCP, web search, and URL-reading capabilities. It contains no `toolPermission`, `artifactReviewPolicy`, `trustedWorkspaces`, full-access flag, or command wildcard in the allow list.
+It contains no unsupported tool aliases, `toolPermission`, `artifactReviewPolicy`, `trustedWorkspaces`, full-access flag, or command wildcard in the allow list.
+
+## Sparse persistence and runtime validation
+
+AGY persists settings sparsely and may rewrite `settings.json` during provider startup. It can omit settings whose values match defaults and can reformat or reorder JSON. Therefore:
+
+- the launcher must write the checked-in profile byte-for-byte before provider execution;
+- post-run byte identity is evidence only, not the authorization gate;
+- the persisted file must pass `validate_persisted_settings`;
+- persisted permissions must allow exactly file read/write and must retain all required command, unsandboxed, MCP, and web denies;
+- missing `enableTelemetry: false` or `allowNonWorkspaceAccess: false` is accepted only in the persisted file, because AGY may omit default-valued keys;
+- any additional allow entry, unsupported action namespace, broad approval setting, missing required deny, symlink, or malformed file is a blocking failure.
+
+The persisted file can be checked from the exact Ringer checkout:
+
+```python
+from pathlib import Path
+from engines.agy_safe_review import validate_persisted_settings
+
+validate_persisted_settings(Path("/absolute/path/to/settings.json"))
+```
+
+Record both the checked-in profile hash and final persisted hash. They are not required to match, but both the initial exact write and the final effective-policy validation are mandatory.
 
 ## Safe-run configuration
 

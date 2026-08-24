@@ -4,20 +4,14 @@
   "permissions": {
     "allow": [
       "read_file(*)",
-      "grep_search(*)",
-      "list_dir(*)",
-      "list_directory(*)",
       "write_file(*)"
     ],
     "deny": [
+      "read_url(*)",
+      "execute_url(*)",
       "command(*)",
-      "run_command(*)",
-      "Bash(*)",
-      "bash(*)",
-      "mcp(*)",
-      "search_web(*)",
-      "web_search(*)",
-      "read_url_content(*)"
+      "unsandboxed(*)",
+      "mcp(*)"
     ]
   }
 }

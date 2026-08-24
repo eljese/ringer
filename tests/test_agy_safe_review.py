@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "engines" / "agy_safe_review.py"
 PROFILE = ROOT / "profiles" / "agy-review-settings.json"
 
+sys.path.insert(0, str(ROOT / "engines"))
+import agy_safe_review as safe_review  # noqa: E402
+
 
 class AgySafeReviewTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -88,10 +91,17 @@ print(json.dumps({
         settings = payload["settings"]
         allow = set(settings["permissions"]["allow"])
         deny = set(settings["permissions"]["deny"])
-        self.assertNotIn("command(*)", allow)
-        self.assertNotIn("run_command(*)", allow)
-        self.assertIn("command(*)", deny)
-        self.assertIn("run_command(*)", deny)
+        self.assertEqual(allow, {"read_file(*)", "write_file(*)"})
+        self.assertEqual(
+            deny,
+            {
+                "read_url(*)",
+                "execute_url(*)",
+                "command(*)",
+                "unsandboxed(*)",
+                "mcp(*)",
+            },
+        )
         self.assertNotIn("toolPermission", settings)
         self.assertNotIn("artifactReviewPolicy", settings)
         settings_path = Path(payload["path"])
@@ -119,20 +129,63 @@ print(json.dumps({
         self.assertIn("refusing to overwrite", result.stderr)
         self.assertEqual(settings.read_bytes(), before)
 
-    def test_profile_is_narrow_and_contains_no_broad_approval_state(self) -> None:
+    def test_profile_is_narrow_and_sparse_persistence_cannot_broaden_it(self) -> None:
         profile = json.loads(PROFILE.read_text(encoding="utf-8"))
         self.assertFalse(profile["enableTelemetry"])
         self.assertFalse(profile["allowNonWorkspaceAccess"])
         self.assertEqual(
             set(profile["permissions"]["allow"]),
+            {"read_file(*)", "write_file(*)"},
+        )
+        self.assertEqual(
+            set(profile["permissions"]["deny"]),
             {
-                "read_file(*)",
-                "grep_search(*)",
-                "list_dir(*)",
-                "list_directory(*)",
-                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "command(*)",
+                "unsandboxed(*)",
+                "mcp(*)",
             },
         )
+        for rules in profile["permissions"].values():
+            for rule in rules:
+                self.assertIn(rule.partition("(")[0], safe_review.SUPPORTED_ACTIONS)
+
+        persisted = self.root / "persisted-settings.json"
+        persisted.write_text(
+            json.dumps(
+                {
+                    "permissions": {
+                        "allow": ["read_file(*)", "write_file(*)"],
+                        "deny": [
+                            "command(*)",
+                            "unsandboxed(*)",
+                            "mcp(*)",
+                            "read_url(*)",
+                            "execute_url(*)",
+                        ],
+                    }
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        validated = safe_review.validate_persisted_settings(persisted)
+        self.assertEqual(
+            set(validated["permissions"]["deny"]),
+            safe_review.REQUIRED_DENY,
+        )
+
+        persisted.write_text(
+            '{"permissions":{"allow":["read_file(*)","write_file(*)","command(*)"],'
+            '"deny":["command(*)","unsandboxed(*)","mcp(*)","read_url(*)",'
+            '"execute_url(*)"]}}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SystemExit):
+            safe_review.validate_persisted_settings(persisted)
+
         serialized = json.dumps(profile, sort_keys=True)
         self.assertNotIn("dangerously-skip-permissions", serialized)
         self.assertNotIn("always-proceed", serialized)
