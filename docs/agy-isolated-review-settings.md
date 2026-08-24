@@ -1,8 +1,8 @@
 # Isolated AGY review settings
 
-`engines/agy_safe_review.py` installs a Ringer-owned AGY settings profile into the isolated per-task worker `HOME` and then replaces itself with the real `agy` executable.
+`engines/agy` is the validator-compatible executable entrypoint for isolated AGY review runs. It imports `engines/agy_safe_review.py`, installs the Ringer-owned AGY settings profile into the isolated per-task worker `HOME`, and then replaces itself with the real `agy` executable.
 
-The launcher is intended only for `bin/ringer-safe-run` review tasks. It requires `RINGER_SAFE_ENFORCE=1`, requires `HOME` below `RINGER_RUNTIME_ROOT/engine-homes/agy/`, refuses symlinks, refuses to overwrite an existing settings file, writes the profile with mode `0600`, and never copies the operator's normal AGY settings.
+The entrypoint is intended only for `bin/ringer-safe-run` review tasks. It requires `RINGER_SAFE_ENFORCE=1`, requires `HOME` below `RINGER_RUNTIME_ROOT/engine-homes/agy/`, refuses symlinks, refuses to overwrite an existing settings file, writes the profile with mode `0600`, and never copies the operator's normal AGY settings.
 
 The profile allows only AGY file-review capabilities:
 
@@ -15,13 +15,13 @@ It explicitly denies command, shell aliases, MCP, web search, and URL-reading ca
 
 ## Safe-run configuration
 
-Create a disposable copy of `config.safe.toml` and change only the AGY command to invoke the launcher through Python. Use the absolute launcher path from the exact Ringer checkout being reviewed:
+Create a disposable copy of `config.safe.toml` and change only the AGY `bin` value to the absolute entrypoint path from the exact Ringer checkout being reviewed:
 
 ```toml
 [engines.agy]
-bin = "python3"
+bin = "/absolute/path/to/ringer/engines/agy"
+model_default = "gemini-3.7-flash-high"
 args_template = [
-  "/absolute/path/to/ringer/engines/agy_safe_review.py",
   "--add-dir",
   "{workdir}",
   "--add-dir",
@@ -39,6 +39,8 @@ args_template = [
 sandbox_args = []
 full_access_args = []
 ```
+
+Do not set `bin = "python3"` and do not prepend `agy_safe_review.py` to `args_template`. The safe-run command validator intentionally requires an AGY worker command whose executable basename is `agy`; the Ringer-owned `engines/agy` entrypoint preserves that invariant while installing the isolated profile.
 
 Keep the existing `[engines.agy.env]` block unchanged, then pass the disposable configuration through `RINGER_SAFE_CONFIG`. Never add `--dangerously-skip-permissions` or enable `allow_full_access`.
 
