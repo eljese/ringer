@@ -2,6 +2,14 @@
 
 `engines/agy` is the validator-compatible executable entrypoint for isolated AGY review runs. It imports `engines/agy_safe_review.py`, validates the isolated worker environment, locates the real `agy` executable outside the Ringer launcher directory, and then replaces itself with that provider.
 
+`config.safe.toml` also sets `stdout_artifact = "report.md"`. AGY 1.1.19
+restricts its artifact writer to a provider-private brain directory, so Ringer
+appends a fixed final-response contract and atomically materializes successful
+provider stdout at the task's `report.md`. The destination is not configurable
+beyond that exact basename, symlinks and non-files fail closed, non-zero and
+timed-out workers never produce a report, and an existing regular report is
+preserved for compatible provider versions.
+
 For the exact preflight probe `agy --version`, the entrypoint forwards directly to the real provider without creating settings. This keeps version detection independent of the review profile. All normal review invocations validate and install the Ringer-owned AGY settings profile into the isolated per-task worker `HOME` before provider execution.
 
 The entrypoint is intended only for `bin/ringer-safe-run` review tasks. It requires `RINGER_SAFE_ENFORCE=1`, requires `HOME` below `RINGER_RUNTIME_ROOT/engine-homes/agy/`, refuses symlinks, refuses to overwrite an existing settings file, writes the checked-in profile byte-for-byte with mode `0600`, and never copies the operator's normal AGY settings.

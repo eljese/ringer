@@ -35,6 +35,10 @@ args_template = [
 sandbox_args = []
 full_access_args = []
 token_regex = ""
+# AGY 1.1.19 constrains write_to_file to its private brain directory. Keep
+# review tasks tool-read-only and let Ringer atomically materialize the final
+# headless response at the fixed task output path instead.
+stdout_artifact = "report.md"
 
 [engines.agy.env]
 HOME = "{runtime_root}/engine-homes/agy/{run_id}/{task_key}"
