@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,6 +32,19 @@ class AgySafeReviewEntrypointTests(unittest.TestCase):
         self.workdir = self.root / "work"
         self.taskdir = self.workdir / "review"
         self.taskdir.mkdir(parents=True)
+
+    def environment(self, *, path: str) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "RINGER_SAFE_ENFORCE": "1",
+                "RINGER_RUNTIME_ROOT": str(self.runtime),
+                "HOME": str(self.home),
+                "PATH": path,
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        return env
 
     def test_entrypoint_is_executable_and_named_agy(self) -> None:
         self.assertEqual(ENTRYPOINT.name, "agy")
@@ -74,19 +88,11 @@ print(json.dumps({
         )
         fake_agy.chmod(0o755)
 
-        env = os.environ.copy()
-        env.update(
-            {
-                "RINGER_SAFE_ENFORCE": "1",
-                "RINGER_RUNTIME_ROOT": str(self.runtime),
-                "HOME": str(self.home),
-                "PATH": str(bin_dir) + os.pathsep + env.get("PATH", ""),
-                "PYTHONDONTWRITEBYTECODE": "1",
-            }
-        )
         result = subprocess.run(
             [str(ENTRYPOINT), "--version"],
-            env=env,
+            env=self.environment(
+                path=str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+            ),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -101,6 +107,31 @@ print(json.dumps({
             payload["settings"],
             json.loads(PROFILE.read_text(encoding="utf-8")),
         )
+
+    def test_entrypoint_does_not_rediscover_itself_from_path(self) -> None:
+        python_dir = self.root / "python-bin"
+        python_dir.mkdir()
+        (python_dir / "python3").symlink_to(Path(sys.executable).resolve())
+
+        result = subprocess.run(
+            [str(ENTRYPOINT), "--version"],
+            env=self.environment(
+                path=str(ENTRYPOINT.parent) + os.pathsep + str(python_dir)
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(
+            "agy executable was not found outside the Ringer review launcher",
+            result.stderr,
+        )
+        settings = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertFalse(settings.exists())
 
 
 if __name__ == "__main__":
