@@ -12,7 +12,9 @@ import tempfile
 from pathlib import Path
 from typing import NoReturn
 
-PROFILE_PATH = Path(__file__).resolve().parents[1] / "profiles" / "agy-review-settings.json"
+LAUNCHER_PATH = Path(__file__).resolve()
+ENTRYPOINT_PATH = LAUNCHER_PATH.with_name("agy")
+PROFILE_PATH = LAUNCHER_PATH.parents[1] / "profiles" / "agy-review-settings.json"
 EXPECTED_ALLOW = {
     "read_file(*)",
     "grep_search(*)",
@@ -140,19 +142,38 @@ def _write_settings(home: Path, profile: dict[str, object]) -> Path:
     return settings_path
 
 
+def _find_real_agy() -> Path | None:
+    """Find the provider binary without rediscovering either Ringer launcher."""
+    launcher_dir = LAUNCHER_PATH.parent
+    filtered_entries: list[str] = []
+    for raw_entry in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(raw_entry or ".").expanduser()
+        try:
+            resolved_entry = candidate.resolve()
+        except OSError:
+            resolved_entry = candidate.absolute()
+        if resolved_entry == launcher_dir:
+            continue
+        filtered_entries.append(raw_entry)
+
+    agy = shutil.which("agy", path=os.pathsep.join(filtered_entries))
+    if not agy:
+        return None
+    resolved = Path(agy).resolve()
+    if resolved in {LAUNCHER_PATH, ENTRYPOINT_PATH}:
+        return None
+    return resolved
+
+
 def main() -> NoReturn:
     _runtime, home = _ensure_safe_home()
     profile = _load_profile()
     settings_path = _write_settings(home, profile)
 
-    agy = shutil.which("agy")
-    if not agy:
+    resolved = _find_real_agy()
+    if resolved is None:
         settings_path.unlink(missing_ok=True)
-        fail("agy executable was not found on PATH")
-    resolved = Path(agy).resolve()
-    if resolved == Path(__file__).resolve():
-        settings_path.unlink(missing_ok=True)
-        fail("agy executable resolved to the review launcher itself")
+        fail("agy executable was not found outside the Ringer review launcher")
 
     os.execvpe(str(resolved), [str(resolved), *sys.argv[1:]], os.environ.copy())
     raise AssertionError("os.execvpe returned unexpectedly")
