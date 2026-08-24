@@ -20,9 +20,9 @@ AGY persists settings sparsely and may rewrite `settings.json` during provider s
 - the launcher must write the checked-in profile byte-for-byte before provider execution;
 - post-run byte identity is evidence only, not the authorization gate;
 - the persisted file must pass `validate_persisted_settings`;
-- persisted permissions must allow exactly file read/write and must retain all required command, unsandboxed, MCP, and web denies;
+- persisted permissions must allow exactly file read/write, retain all required command, unsandboxed, MCP, and web denies, and contain no `ask` rules;
 - missing `enableTelemetry: false` or `allowNonWorkspaceAccess: false` is accepted only in the persisted file, because AGY may omit default-valued keys;
-- any additional allow entry, unsupported action namespace, broad approval setting, missing required deny, symlink, or malformed file is a blocking failure.
+- any additional allow entry, non-empty `ask` list, unknown permission section, unsupported action namespace, broad approval setting, missing required deny, symlink, or malformed file is a blocking failure.
 
 The persisted file can be checked from the exact Ringer checkout:
 

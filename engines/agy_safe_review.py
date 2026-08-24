@@ -85,6 +85,12 @@ def _validate_profile(
     permissions = profile.get("permissions")
     if not isinstance(permissions, dict):
         fail("review settings permissions must be an object")
+    unknown_permission_keys = sorted(set(permissions) - {"allow", "deny", "ask"})
+    if unknown_permission_keys:
+        fail(
+            "review settings permissions contain unsupported sections: "
+            + ", ".join(unknown_permission_keys)
+        )
     allow = permissions.get("allow")
     deny = permissions.get("deny")
     ask = permissions.get("ask", [])
@@ -106,6 +112,8 @@ def _validate_profile(
 
     if set(allow) != EXPECTED_ALLOW:
         fail("review settings allow list is broader or narrower than file review")
+    if ask:
+        fail("review settings ask list must be empty")
     deny_set = set(deny)
     if sparse_defaults:
         if not REQUIRED_DENY.issubset(deny_set):
