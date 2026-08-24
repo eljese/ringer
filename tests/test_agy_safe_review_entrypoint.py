@@ -68,7 +68,7 @@ class AgySafeReviewEntrypointTests(unittest.TestCase):
             engine_name="agy",
         )
 
-    def test_entrypoint_installs_profile_then_executes_real_agy(self) -> None:
+    def test_entrypoint_version_probe_bypasses_profile_then_review_installs_it(self) -> None:
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         fake_agy = bin_dir / "agy"
@@ -79,34 +79,58 @@ import os
 import pathlib
 import sys
 settings = pathlib.Path(os.environ["HOME"]) / ".gemini" / "antigravity-cli" / "settings.json"
-print(json.dumps({
+payload = {
     "argv": sys.argv[1:],
-    "settings": json.loads(settings.read_text(encoding="utf-8")),
-}, sort_keys=True))
+    "settings_exists": settings.is_file(),
+}
+if settings.is_file():
+    payload["settings"] = json.loads(settings.read_text(encoding="utf-8"))
+print(json.dumps(payload, sort_keys=True))
 """,
             encoding="utf-8",
         )
         fake_agy.chmod(0o755)
+        env = self.environment(
+            path=str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+        )
 
-        result = subprocess.run(
+        version = subprocess.run(
             [str(ENTRYPOINT), "--version"],
-            env=self.environment(
-                path=str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
-            ),
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
         )
+        self.assertEqual(version.returncode, 0, version.stderr)
+        version_payload = json.loads(version.stdout)
+        self.assertEqual(version_payload["argv"], ["--version"])
+        self.assertFalse(version_payload["settings_exists"])
+        settings_path = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertFalse(settings_path.exists())
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["argv"], ["--version"])
+        review = subprocess.run(
+            [str(ENTRYPOINT), "--model", "gemini-test", "-p", "review"],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(review.returncode, 0, review.stderr)
+        review_payload = json.loads(review.stdout)
         self.assertEqual(
-            payload["settings"],
+            review_payload["argv"],
+            ["--model", "gemini-test", "-p", "review"],
+        )
+        self.assertTrue(review_payload["settings_exists"])
+        self.assertEqual(
+            review_payload["settings"],
             json.loads(PROFILE.read_text(encoding="utf-8")),
         )
+        self.assertEqual(settings_path.read_bytes(), PROFILE.read_bytes())
 
     def test_entrypoint_does_not_rediscover_itself_from_path(self) -> None:
         python_dir = self.root / "python-bin"

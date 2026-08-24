@@ -96,6 +96,7 @@ print(json.dumps({
         self.assertNotIn("artifactReviewPolicy", settings)
         settings_path = Path(payload["path"])
         self.assertTrue(settings_path.is_file())
+        self.assertEqual(settings_path.read_bytes(), PROFILE.read_bytes())
         self.assertEqual(stat.S_IMODE(settings_path.parent.stat().st_mode), 0o700)
 
     def test_launcher_refuses_home_outside_isolated_agy_tree(self) -> None:

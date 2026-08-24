@@ -104,17 +104,18 @@ def _ensure_safe_home() -> tuple[Path, Path]:
     return runtime, home
 
 
-def _load_profile() -> dict[str, object]:
+def _load_profile() -> tuple[dict[str, object], bytes]:
     if PROFILE_PATH.is_symlink() or not PROFILE_PATH.is_file():
         fail("Ringer-owned review settings profile is missing or is a symlink")
     try:
-        profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        payload = PROFILE_PATH.read_bytes()
+        profile = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         fail(f"could not load the review settings profile: {error}")
-    return _validate_profile(profile)
+    return _validate_profile(profile), payload
 
 
-def _write_settings(home: Path, profile: dict[str, object]) -> Path:
+def _write_settings(home: Path, payload: bytes) -> Path:
     settings_dir = home / ".gemini" / "antigravity-cli"
     settings_path = settings_dir / "settings.json"
     for candidate in (home / ".gemini", settings_dir, settings_path):
@@ -125,12 +126,11 @@ def _write_settings(home: Path, profile: dict[str, object]) -> Path:
     if settings_path.exists():
         fail("isolated AGY settings already exist; refusing to overwrite them")
 
-    payload = json.dumps(profile, indent=2, sort_keys=True) + "\n"
     fd, temporary = tempfile.mkstemp(prefix=".settings.", dir=settings_dir)
     temp_path = Path(temporary)
     try:
         os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -165,18 +165,23 @@ def _find_real_agy() -> Path | None:
     return resolved
 
 
-def main() -> NoReturn:
-    _runtime, home = _ensure_safe_home()
-    profile = _load_profile()
-    settings_path = _write_settings(home, profile)
-
-    resolved = _find_real_agy()
-    if resolved is None:
-        settings_path.unlink(missing_ok=True)
-        fail("agy executable was not found outside the Ringer review launcher")
-
+def _exec_real_agy(resolved: Path) -> NoReturn:
     os.execvpe(str(resolved), [str(resolved), *sys.argv[1:]], os.environ.copy())
     raise AssertionError("os.execvpe returned unexpectedly")
+
+
+def main() -> NoReturn:
+    _runtime, home = _ensure_safe_home()
+    resolved = _find_real_agy()
+    if resolved is None:
+        fail("agy executable was not found outside the Ringer review launcher")
+
+    if sys.argv[1:] == ["--version"]:
+        _exec_real_agy(resolved)
+
+    _profile, payload = _load_profile()
+    _write_settings(home, payload)
+    _exec_real_agy(resolved)
 
 
 if __name__ == "__main__":
