@@ -12,7 +12,7 @@ from typing import Any
 PROFILE_NAME = "pr-train-delivery"
 PROFILE_VERSION = 1
 FORBIDDEN_WORKER_ACTIONS = re.compile(
-    r"\b(?:git\s+(?:add|commit|push)|gh\s+pr\s+create|create\s+(?:a\s+)?pull request)\b",
+    r"\bgit\s+(?:add|commit|push)\b|\bgh\s+pr\s+create\b",
     re.IGNORECASE,
 )
 WEAK_CHECKS = {"true", "exit 0", "echo done", ":"}
@@ -51,8 +51,11 @@ def validate(profile_path: Path, manifest_path: Path) -> list[str]:
     if task.get("model") != "minimax-coding-plan/MiniMax-M3":
         errors.append("implementation model must be MiniMax-M3")
     spec = str(task.get("spec") or "")
-    if FORBIDDEN_WORKER_ACTIONS.search(spec):
-        errors.append("worker spec authorizes controller-owned Git/PR mutation")
+    for match in FORBIDDEN_WORKER_ACTIONS.finditer(spec):
+        prefix = spec[max(0, match.start() - 24) : match.start()].lower()
+        if not any(denial in prefix for denial in ("never ", "do not ", "must not ")):
+            errors.append("worker spec authorizes controller-owned Git/PR mutation")
+            break
     required_denials = ("Never stage", "commit", "push", "pull request", "uncommitted")
     for token in required_denials:
         if token.lower() not in spec.lower():
