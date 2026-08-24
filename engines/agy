@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Validator-compatible entrypoint for isolated AGY review runs."""
+
+from __future__ import annotations
+
+from agy_safe_review import main
+
+
+if __name__ == "__main__":
+    main()
