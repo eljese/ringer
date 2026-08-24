@@ -204,6 +204,16 @@ print(json.dumps({
         with self.assertRaises(SystemExit):
             safe_review.validate_persisted_settings(persisted)
 
+        persisted.write_text(
+            '{"approvalMode":"auto","permissions":{'
+            '"allow":["read_file(*)","write_file(*)"],'
+            '"deny":["command(*)","unsandboxed(*)","mcp(*)","read_url(*)",'
+            '"execute_url(*)"]}}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaises(SystemExit):
+            safe_review.validate_persisted_settings(persisted)
+
         serialized = json.dumps(profile, sort_keys=True)
         self.assertNotIn("dangerously-skip-permissions", serialized)
         self.assertNotIn("always-proceed", serialized)

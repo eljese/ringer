@@ -35,10 +35,10 @@ REQUIRED_DENY = {
     "unsandboxed(*)",
     "mcp(*)",
 }
-FORBIDDEN_TOP_LEVEL = {
-    "toolPermission",
-    "artifactReviewPolicy",
-    "trustedWorkspaces",
+ALLOWED_TOP_LEVEL = {
+    "enableTelemetry",
+    "allowNonWorkspaceAccess",
+    "permissions",
 }
 
 
@@ -69,8 +69,12 @@ def _validate_profile(
 ) -> dict[str, object]:
     if not isinstance(profile, dict):
         fail("review settings profile must be a JSON object")
-    if FORBIDDEN_TOP_LEVEL.intersection(profile):
-        fail("review settings profile contains broad approval state")
+    unknown_top_level = sorted(set(profile) - ALLOWED_TOP_LEVEL)
+    if unknown_top_level:
+        fail(
+            "review settings contain unsupported top-level keys: "
+            + ", ".join(unknown_top_level)
+        )
 
     for key, label in (
         ("enableTelemetry", "disable telemetry"),
