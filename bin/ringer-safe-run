@@ -100,6 +100,16 @@ is_under() {
   esac
 }
 
+configure_safe_engine_path() {
+  local account_home="${1:-}"
+  if [ -n "$account_home" ]; then
+    PATH="$RINGER_ROOT/engines:$account_home/.local/bin:/usr/bin:/bin"
+  else
+    PATH="$RINGER_ROOT/engines:${PATH:-/usr/bin:/bin}"
+  fi
+  export PATH
+}
+
 fail_cleanup() {
   echo "CLEANUP_FAILURE" >&2
   if [ -n "${1:-}" ]; then
@@ -643,10 +653,10 @@ ringer_safe_main() {
 
   if [ "$ACCOUNT_HOME_MODE" -eq 1 ]; then
     REAL_HOME="$(resolve_login_account_home)" || exit 2
-    PATH="$REAL_HOME/.local/bin:/usr/bin:/bin"
-    export PATH
+    configure_safe_engine_path "$REAL_HOME"
   else
     REAL_HOME="${HOME}"
+    configure_safe_engine_path
   fi
   export RINGER_SAFE_REAL_HOME="$REAL_HOME"
   HOST_HOME="$RUNTIME/host-home"

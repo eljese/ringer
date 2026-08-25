@@ -1452,6 +1452,42 @@ class IntegrationIsolationTests(IsolationTestCase):
 
 
 class SafeRunWrapperTests(IsolationTestCase):
+    def test_wrapper_prioritizes_ringer_owned_agy_launcher(self) -> None:
+        command = (
+            'source "$1"; '
+            'PATH="/usr/bin:/bin"; '
+            'configure_safe_engine_path "$2"; '
+            'command -v agy'
+        )
+        fake_account_home = self.root / "account-home"
+        fake_account_home.mkdir()
+        competing_bin = fake_account_home / ".local" / "bin"
+        competing_bin.mkdir(parents=True)
+        competing_agy = competing_bin / "agy"
+        competing_agy.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        competing_agy.chmod(0o755)
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                command,
+                "bash",
+                str(ROOT / "bin" / "ringer-safe-run"),
+                str(fake_account_home),
+            ],
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(
+            result.stdout.strip(),
+            str((ROOT / "engines" / "agy").resolve()),
+        )
+
     def test_safe_config_keeps_sandbox_and_denies_full_access(self) -> None:
         data = tomllib.loads((ROOT / "config.safe.toml").read_text(encoding="utf-8"))
         self.assertFalse(data["allow_full_access"])
