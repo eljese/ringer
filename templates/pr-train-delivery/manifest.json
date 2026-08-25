@@ -1,0 +1,43 @@
+{
+  "run_name": "{{REPOSITORY_SLUG}}:{{TRAIN_ID}}:{{PR_ID}}",
+  "workdir": "{{EXTERNAL_WORKDIR}}",
+  "repo": "{{SOURCE_REPO}}",
+  "max_parallel": 1,
+  "supervisor": {
+    "routes": [
+      {
+        "engine": "opencode",
+        "model": "minimax-coding-plan/MiniMax-M3",
+        "timeout_seconds": 900
+      }
+    ],
+    "provider_probes": "{{EXACT_PROVIDER_PROBES_OBJECT}}",
+    "worker_capability_probes": "{{EXACT_WORKER_CAPABILITY_PROBES_OBJECT}}",
+    "allowed_changed_paths": [
+      "{{EXACT_OWNED_PATH}}"
+    ],
+    "credential_seed": {
+      "required": true
+    }
+  },
+  "tasks": [
+    {
+      "key": "implementation",
+      "engine": "opencode",
+      "model": "minimax-coding-plan/MiniMax-M3",
+      "task_type": "code-feature",
+      "timeout_s": 2400,
+      "spec": "You are the implementation worker for {{PR_ID}} in {{REPOSITORY_SLUG}}. Your task directory is isolated and the candidate repository worktree is supplied by the supervisor. Implement only the approved PR scope. OWNERSHIP: change only {{OWNED_PATHS_CSV}}. Never touch harness artifacts, .git, .ringer, .codex-pr-train, or .pr-train-runtime. Never stage, commit, push, create a branch, create a pull request, invoke another model, or run another Ringer/supervisor process. Follow existing repository conventions. Run the listed verification commands, fix failures only inside owned paths, and leave all source changes uncommitted for controller-owned promotion. Produce no completion marker as proof; executable checks and the canonical supervisor outcome are authoritative.",
+      "check": "{{INNER_DIAGNOSTIC_CHECK_WITH_FAILURE_OUTPUT}}",
+      "objective_checks": [
+        {
+          "argv": [
+            "{{CHECK_BINARY}}",
+            "{{CHECK_ARGUMENT}}"
+          ]
+        }
+      ],
+      "expect_files": []
+    }
+  ]
+}
