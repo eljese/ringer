@@ -1461,6 +1461,11 @@ class SafeRunWrapperTests(IsolationTestCase):
         )
         fake_account_home = self.root / "account-home"
         fake_account_home.mkdir()
+        competing_bin = fake_account_home / ".local" / "bin"
+        competing_bin.mkdir(parents=True)
+        competing_agy = competing_bin / "agy"
+        competing_agy.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        competing_agy.chmod(0o755)
         result = subprocess.run(
             [
                 "bash",
