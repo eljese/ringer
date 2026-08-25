@@ -344,6 +344,45 @@ class HardenedSupervisorTests(unittest.TestCase):
         self.assertEqual(outcome["failure_class"], "PREFLIGHT_FAILURE")
         self.assertFalse(worker_marker.exists())
 
+    def test_empty_provider_probe_response_is_recoverable_engine_runtime_error(self) -> None:
+        empty_dir = self.root / "empty-provider"
+        empty_dir.mkdir()
+        empty_provider = empty_dir / "opencode"
+        empty_provider.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        empty_provider.chmod(0o755)
+        worker_marker = self.root / "worker-started"
+        fake_worker = self.root / "worker"
+        fake_worker.write_text(
+            "#!/bin/sh\ntouch %s\n" % worker_marker,
+            encoding="utf-8",
+        )
+        fake_worker.chmod(0o755)
+        probes = {
+            "opencode:minimax-only": {
+                "kind": "inference",
+                "argv": [
+                    str(empty_provider),
+                    "run",
+                    "--model",
+                    "minimax-only",
+                    "Return exactly PROBE_OK",
+                ],
+                "expected_output": "PROBE_OK",
+            }
+        }
+        manifest = self.write_manifest(
+            self.task(),
+            [{"engine": "opencode", "model": "minimax-only"}],
+            provider_probes=probes,
+        )
+
+        self.assertEqual(hardened.command_run(self.args(manifest, fake_worker)), 2)
+
+        outcome = json.loads((self.artifacts / "supervisor-outcome.json").read_text())
+        self.assertEqual(outcome["failure_class"], "ENGINE_RUNTIME_ERROR")
+        self.assertIn("returned no canary", outcome["error"])
+        self.assertFalse(worker_marker.exists())
+
     def test_no_progress_timeout_has_one_terminal_event(self) -> None:
         fake = self.root / "sleep-worker.py"
         fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n", encoding="utf-8")
