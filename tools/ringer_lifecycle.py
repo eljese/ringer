@@ -112,6 +112,8 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def classify_failure(text: str, *, returncode: int | None = None) -> str:
+    if "ENGINE_RUNTIME_ERROR" in text:
+        return "ENGINE_RUNTIME_ERROR"
     if "HOME_ISOLATION_FAILURE" in text:
         return "HOME_ISOLATION_FAILURE"
     if "RUNTIME_PATH_ESCAPE" in text:

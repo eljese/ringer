@@ -383,7 +383,7 @@ def _run_inference_probe(
         except subprocess.TimeoutExpired:
             _kill_process(process)
             raise HardenedSupervisorError(
-                f"PREFLIGHT_FAILURE: provider inference probe timed out for {_route_key(route)}"
+                f"PROVIDER_TIMEOUT: provider inference probe timed out for {_route_key(route)}"
             )
     except BaseException:
         _kill_process(process)
@@ -391,13 +391,23 @@ def _run_inference_probe(
     finally:
         _ACTIVE_PROCESSES.discard(process)
     if process.returncode != 0:
+        failure_class = lifecycle.classify_failure(
+            output or "", returncode=process.returncode
+        )
+        if failure_class not in {
+            "PROVIDER_QUOTA",
+            "PROVIDER_TIMEOUT",
+            "NETWORK_SANDBOX",
+        }:
+            failure_class = "ENGINE_RUNTIME_ERROR"
         raise HardenedSupervisorError(
-            f"PREFLIGHT_FAILURE: provider inference probe failed for {_route_key(route)} "
+            f"{failure_class}: provider inference probe failed for {_route_key(route)} "
             f"with return code {process.returncode}"
         )
     if probe["expected_output"] not in (output or ""):
         raise HardenedSupervisorError(
-            f"PREFLIGHT_FAILURE: provider inference probe returned no canary for {_route_key(route)}"
+            "ENGINE_RUNTIME_ERROR: provider inference probe returned no canary "
+            f"for {_route_key(route)}"
         )
     return {
         "healthy": True,
